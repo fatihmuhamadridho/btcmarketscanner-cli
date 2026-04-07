@@ -1,9 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { render, Box, Text, useApp, useInput } from "ink";
+import { helloCore } from "btcmarketscanner-core";
 
 function App() {
   const { exit } = useApp();
   const [tick, setTick] = useState(0);
+
+  console.log(helloCore());
 
   useInput((input, key) => {
     if (input === "q" || key.escape) {

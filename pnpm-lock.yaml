@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      btcmarketscanner-core:
+        specifier: github:fatihmuhamadridho/btcmarketscanner-core#v0.0.3
+        version: https://codeload.github.com/fatihmuhamadridho/btcmarketscanner-core/tar.gz/94d212ca22fc9371a5a35efee9934f45d19c3431
       ink:
         specifier: ^6.8.0
         version: 6.8.0(@types/react@19.2.14)(react@19.2.4)
@@ -211,6 +214,10 @@ packages:
   auto-bind@5.0.1:
     resolution: {integrity: sha512-ooviqdwwgfIfNmDwo94wlshcdzfO64XV0Cg6oDsDYBJfITDz1EngD2z7DkbvCWn+XIMsIqW27sEVF6qcpJrRcg==}
     engines: {node: ^12.20.0 || ^14.13.1 || >=16.0.0}
+
+  btcmarketscanner-core@https://codeload.github.com/fatihmuhamadridho/btcmarketscanner-core/tar.gz/94d212ca22fc9371a5a35efee9934f45d19c3431:
+    resolution: {tarball: https://codeload.github.com/fatihmuhamadridho/btcmarketscanner-core/tar.gz/94d212ca22fc9371a5a35efee9934f45d19c3431}
+    version: 0.0.3
 
   chalk@5.6.2:
     resolution: {integrity: sha512-7NzBL0rN6fMUW+f7A6Io4h40qQlG+xGmtMxfbnH/K7TAtt8JQWVQK+6g0UXKMeVJoyV5EkkNsErQ8pVD3bLHbA==}
@@ -501,6 +508,8 @@ snapshots:
   ansi-styles@6.2.3: {}
 
   auto-bind@5.0.1: {}
+
+  btcmarketscanner-core@https://codeload.github.com/fatihmuhamadridho/btcmarketscanner-core/tar.gz/94d212ca22fc9371a5a35efee9934f45d19c3431: {}
 
   chalk@5.6.2: {}
 
