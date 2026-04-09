@@ -4,6 +4,7 @@ import { analyzeSetupSide, analyzeTrend, getSupportResistance } from 'btcmarkets
 import { CommandBar } from '@components/molecules/CommandBar.molecule';
 import { CommandHistory } from '@components/molecules/CommandHistory.molecule';
 import { CommandSuggestions } from '@components/molecules/CommandSuggestions.molecule';
+import { WatchPicker, type WatchPickerItem } from '@components/molecules/WatchPicker.molecule';
 import { HelpOverlay } from '@components/organisms/HelpOverlay.organism';
 import { TradingDashboard } from '@components/organisms/TradingDashboard.organism';
 import { futuresAutoBotService } from '@core/binance/futures/bot/infrastructure/futuresAutoBot.service';
@@ -64,6 +65,43 @@ function buildAutoBotPlan(snapshot: MarketSnapshot, currentPrice: number) {
     symbol: snapshot.pair,
     takeProfits: snapshot.setup.takeProfits,
   };
+}
+
+function formatCompactVolume(value: string | undefined) {
+  const numeric = Number(value ?? '0');
+  if (!Number.isFinite(numeric) || numeric <= 0) return 'n/a';
+  if (numeric >= 1_000_000_000) return `${(numeric / 1_000_000_000).toFixed(1)}B`;
+  if (numeric >= 1_000_000) return `${(numeric / 1_000_000).toFixed(1)}M`;
+  if (numeric >= 1_000) return `${(numeric / 1_000).toFixed(1)}K`;
+  return numeric.toFixed(0);
+}
+
+function buildWatchPickerItems(liveState: LiveMarketState, watchlist: string[]): WatchPickerItem[] {
+  const marketItems = liveState.overview?.data ?? [];
+  const marketMap = new Map(
+    marketItems
+      .filter((item) => item.symbol)
+      .map((item) => [item.symbol, item] as const),
+  );
+  const watchlisted = watchlist
+    .map((symbol) => marketMap.get(symbol))
+    .filter((item): item is NonNullable<(typeof marketItems)[number]> => Boolean(item));
+  const rest = marketItems
+    .filter((item) => item.symbol && !watchlist.includes(item.symbol))
+    .sort((left, right) => {
+      const leftVolume = Number(left.ticker.quoteVolume ?? left.ticker.volume ?? '0');
+      const rightVolume = Number(right.ticker.quoteVolume ?? right.ticker.volume ?? '0');
+      return rightVolume - leftVolume;
+    });
+
+  return [...watchlisted, ...rest].map((item) => ({
+    displayName: item.displayName,
+    isTrading: item.isTrading,
+    isWatched: watchlist.includes(item.symbol),
+    pair: item.pair ?? item.symbol,
+    symbol: item.symbol,
+    volumeLabel: formatCompactVolume(item.ticker.quoteVolume ?? item.ticker.volume),
+  }));
 }
 
 async function loadCandlesWithHistory(symbol: string, intervals: string[], targetCount = 220) {
@@ -164,6 +202,50 @@ function App() {
   const [refreshToken, setRefreshToken] = useState(0);
 
   useInput((input: string, key) => {
+    if (terminal.watchPickerOpen) {
+      if (key.escape) {
+        setTerminal((current) => ({ ...current, watchPickerOpen: false, watchPickerSelectedIndex: 0 }));
+        return;
+      }
+
+      if (key.upArrow || key.downArrow) {
+        const watchPickerItems = buildWatchPickerItems(liveState, terminal.watchlist);
+        if (watchPickerItems.length === 0) return;
+        setTerminal((current) => ({
+          ...current,
+          watchPickerSelectedIndex: key.upArrow
+            ? current.watchPickerSelectedIndex <= 0
+              ? watchPickerItems.length - 1
+              : current.watchPickerSelectedIndex - 1
+            : current.watchPickerSelectedIndex >= watchPickerItems.length - 1
+              ? 0
+              : current.watchPickerSelectedIndex + 1,
+        }));
+        return;
+      }
+
+      if (key.return) {
+        const watchPickerItems = buildWatchPickerItems(liveState, terminal.watchlist);
+        const selectedItem = watchPickerItems[terminal.watchPickerSelectedIndex] ?? watchPickerItems[0];
+        if (selectedItem) {
+          setTerminal((current) => ({
+            ...current,
+            activeSymbol: selectedItem.symbol,
+            watchPickerOpen: false,
+            watchPickerSelectedIndex: 0,
+            watchlist: current.watchlist.includes(selectedItem.symbol)
+              ? current.watchlist
+              : [selectedItem.symbol, ...current.watchlist].slice(0, 8),
+          }));
+          setCommandInput('');
+          setRefreshToken((current) => current + 1);
+        }
+        return;
+      }
+
+      return;
+    }
+
     if (key.escape && commandInput.length === 0) {
       exit();
       return;
@@ -202,6 +284,7 @@ function App() {
           ...current,
           ...result.state,
           levels: nextLevels,
+          watchPickerSelectedIndex: result.state.watchPickerSelectedIndex ?? current.watchPickerSelectedIndex,
           history: [
             ...current.history,
             {
@@ -410,6 +493,7 @@ function App() {
       .map((entry) => ({ command: entry.command, description: entry.description }));
   }, [commandInput]);
   const panelWidth = Math.max(40, terminalWidth - 2);
+  const watchPickerItems = useMemo(() => buildWatchPickerItems(liveState, terminal.watchlist), [liveState.overview, terminal.watchlist]);
 
   return (
     <Box flexDirection="column" padding={1} height={terminalHeight}>
@@ -483,6 +567,9 @@ function App() {
         ) : null}
         {liveState.error ? null : terminal.history.length > 1 ? <CommandHistory items={terminal.history} width={panelWidth} /> : null}
         {liveState.error ? null : terminal.showHelp ? <HelpOverlay width={panelWidth} /> : null}
+        {terminal.watchPickerOpen ? (
+          <WatchPicker items={watchPickerItems} selectedIndex={terminal.watchPickerSelectedIndex} width={panelWidth} />
+        ) : null}
       </Box>
 
         {liveState.error ? null : snapshot ? (

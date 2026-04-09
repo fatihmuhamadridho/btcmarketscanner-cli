@@ -18,6 +18,8 @@ export type TerminalState = {
   autoTrade: boolean;
   levels: TerminalLevelState;
   mode: TerminalMode;
+  watchPickerOpen: boolean;
+  watchPickerSelectedIndex: number;
   view: TerminalView;
   watchlist: string[];
   showHelp: boolean;

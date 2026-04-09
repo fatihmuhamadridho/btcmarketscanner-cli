@@ -23,6 +23,8 @@ export function getDefaultTerminalState(): TerminalState {
       },
     },
     mode: 'swing',
+    watchPickerOpen: false,
+    watchPickerSelectedIndex: 0,
     view: 'overview',
     watchlist: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'],
     showHelp: false,
@@ -38,7 +40,7 @@ export function getDefaultTerminalState(): TerminalState {
 
 export function formatAvailableCommands() {
   return [
-    { command: '/watch', example: 'BTCUSDT', description: 'switch the active market symbol used by the scanner' },
+    { command: '/watch', example: 'BTCUSDT', description: 'open the live symbol picker or switch to a specific market symbol' },
     { command: '/mode', example: 'scalp|swing|position', description: 'change how the scanner interprets market structure and risk' },
     { command: '/entry', example: '65300', description: 'set the planned entry price for the current setup' },
     { command: '/sl', example: '64000', description: 'set the stop loss level to control downside risk' },
@@ -144,7 +146,15 @@ export function applyTerminalCommand(input: string, current: TerminalState): Com
   if (lowerCommand === 'watch') {
     const symbol = normalizeSymbol(arg);
     if (!symbol) {
-      return { state: {}, kind: 'error', message: 'Usage: /watch BTCUSDT' };
+      return {
+        state: {
+          watchPickerOpen: true,
+          watchPickerSelectedIndex: 0,
+          showHelp: false,
+        },
+        kind: 'system',
+        message: 'Watch picker opened. Use arrows and Enter.',
+      };
     }
 
     const watchlist = current.watchlist.includes(symbol)
@@ -155,6 +165,8 @@ export function applyTerminalCommand(input: string, current: TerminalState): Com
       state: {
         activeSymbol: symbol,
         watchlist,
+        watchPickerOpen: false,
+        watchPickerSelectedIndex: 0,
         showHelp: false,
       },
       kind: 'system',
