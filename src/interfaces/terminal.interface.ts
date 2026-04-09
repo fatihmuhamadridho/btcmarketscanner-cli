@@ -1,4 +1,5 @@
 export type TerminalMode = 'scalp' | 'swing' | 'position';
+export type TerminalView = 'overview' | 'market' | 'bot' | 'orders' | 'history';
 
 export type TerminalLevelState = {
   entry: number | null;
@@ -17,6 +18,7 @@ export type TerminalState = {
   autoTrade: boolean;
   levels: TerminalLevelState;
   mode: TerminalMode;
+  view: TerminalView;
   watchlist: string[];
   showHelp: boolean;
   history: TerminalHistoryItem[];
@@ -28,4 +30,5 @@ export type CommandResult =
       message: string;
       kind?: TerminalHistoryItem['kind'];
       preserveInput?: boolean;
+      refresh?: boolean;
     };

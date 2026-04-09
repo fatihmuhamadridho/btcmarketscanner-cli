@@ -3,9 +3,9 @@ import { Box, Text } from 'ink';
 import { Panel } from '@components/molecules/Panel.molecule';
 import { formatAvailableCommands } from '@lib/command-parser';
 
-export function HelpOverlay() {
+export function HelpOverlay({ width }: { width?: number }) {
   return (
-    <Panel title="Slash Commands" width={84}>
+    <Panel title="Slash Commands" width={width}>
       <Box flexDirection="column">
         {formatAvailableCommands().map((entry) => (
           <Text key={entry.command}>

@@ -1,11 +1,8 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import { Badge } from '@components/atoms/Badge.atom';
-import { SectionTitle } from '@components/atoms/SectionTitle.atom';
-import { StatLine } from '@components/atoms/StatLine.atom';
 import { Panel } from '@components/molecules/Panel.molecule';
-import { TradeRow } from '@components/molecules/TradeRow.molecule';
-import type { MarketMode, MarketSnapshot } from '@interfaces/market.interface';
+import type { MarketMode, MarketSnapshot, MarketSnapshotView, LiveMarketState } from '@interfaces/market.interface';
 
 function pct(value: number | null) {
   if (value === null || Number.isNaN(value)) return 'n/a';
@@ -19,9 +16,54 @@ function price(value: number | null) {
 }
 
 function tone(direction: string) {
-  if (direction === 'bullish' || direction === 'long') return '#41d3a2';
-  if (direction === 'bearish' || direction === 'short') return '#ff7b72';
-  return '#8b949e';
+  if (direction === 'bullish' || direction === 'long') return '#50fa7b';
+  if (direction === 'bearish' || direction === 'short') return '#ff6b6b';
+  return '#c9d1d9';
+}
+
+function numberTone(value: number | null, fallback = '#f8f8f2') {
+  if (value === null || Number.isNaN(value)) return '#8b949e';
+  if (value > 0) return '#50fa7b';
+  if (value < 0) return '#ff6b6b';
+  return fallback;
+}
+
+function renderList(items: Array<string | null | undefined>, fallback: string) {
+  const text = items.filter(Boolean).join(' • ');
+  return text.length > 0 ? text : fallback;
+}
+
+function compact(value: string) {
+  return value.length > 26 ? `${value.slice(0, 23)}...` : value;
+}
+
+function line(label: string, value: React.ReactNode, labelWidth = 18) {
+  return (
+    <Box flexDirection="row">
+      <Box width={labelWidth} marginRight={1} flexShrink={0}>
+        <Text color="#8b949e" bold>
+          {label}
+        </Text>
+      </Box>
+      <Box flexGrow={1} flexShrink={1}>
+        <Text color="#f8f8f2">{value}</Text>
+      </Box>
+    </Box>
+  );
+}
+
+function ema(candles: Array<{ close: number }>, period: number) {
+  if (candles.length < period) return null;
+  const closes = candles.map((candle) => candle.close);
+  const seedWindow = closes.slice(0, period);
+  let value = seedWindow.reduce((sum, close) => sum + close, 0) / period;
+  const multiplier = 2 / (period + 1);
+
+  for (let index = period; index < closes.length; index += 1) {
+    value = (closes[index] - value) * multiplier + value;
+  }
+
+  return value;
 }
 
 export function TradingDashboard({
@@ -29,151 +71,211 @@ export function TradingDashboard({
   mode,
   tick,
   autoTrade,
+  liveState,
+  view,
+  panelWidth,
 }: {
   snapshot: MarketSnapshot;
   mode: MarketMode;
   tick: number;
   autoTrade: boolean;
+  liveState: LiveMarketState;
+  view: MarketSnapshotView;
+  panelWidth: number;
 }) {
-  const lastPrice = snapshot.candles.at(-1)?.close ?? null;
+  const marketCandles = liveState.initialCandles.length
+    ? liveState.initialCandles
+    : liveState.symbolDetail?.data.candles.length
+      ? liveState.symbolDetail.data.candles
+      : snapshot.candles;
+  const lastPrice = marketCandles.at(-1)?.close ?? null;
+  const highPrice = marketCandles.reduce((max, candle) => Math.max(max, candle.high), Number.NEGATIVE_INFINITY);
+  const lowPrice = marketCandles.reduce((min, candle) => Math.min(min, candle.low), Number.POSITIVE_INFINITY);
+  const openPrice = snapshot.trend.startPrice ?? marketCandles.at(0)?.close ?? null;
   const change = snapshot.trend.changePercent;
   const trendColor = tone(snapshot.trend.direction);
   const setupColor = tone(snapshot.setup.direction);
-  const stopDistance =
-    snapshot.setup.stopLoss !== null && lastPrice !== null
-      ? Math.abs(lastPrice - snapshot.setup.stopLoss)
-      : null;
-  const targetDistance =
-    snapshot.setup.takeProfit !== null && lastPrice !== null
-      ? Math.abs(snapshot.setup.takeProfit - lastPrice)
-      : null;
-  const riskReward =
-    snapshot.setup.riskReward !== null
-      ? `1:${snapshot.setup.riskReward.toFixed(2)}`
-      : 'n/a';
+  const botStateLabel = liveState.bot?.status ?? 'idle';
+  const openOrderCount = liveState.openOrders ? liveState.openOrders[0].length + liveState.openOrders[1].length : 0;
+  const openPositionCount = liveState.openPositions?.filter((position) => Math.abs(Number(position.positionAmt ?? 0)) > 0).length ?? 0;
+  const support = snapshot.supportResistance?.support ?? null;
+  const resistance = snapshot.supportResistance?.resistance ?? null;
+  const rangeValue = Number.isFinite(highPrice) && Number.isFinite(lowPrice) ? highPrice - lowPrice : null;
+  const watchMode = view === 'overview' || view === 'market';
+  const emaCandles = marketCandles;
+  const ema20 = snapshot.trend.ema20 ?? ema(emaCandles, 20);
+  const ema50 = snapshot.trend.ema50 ?? ema(emaCandles, 50);
+  const ema100 = snapshot.trend.ema100 ?? ema(emaCandles, 100);
+  const ema200 = snapshot.trend.ema200 ?? ema(emaCandles, 200);
 
   return (
-    <Box flexDirection="column" paddingX={1}>
-      <Box marginBottom={1} flexDirection="column">
-        <Text>
-          <Text color="#7ee7ff" bold>
-            BTC Market Scanner
-          </Text>{' '}
-          <Text dimColor>trading desk</Text>
-        </Text>
-        <Text dimColor>
-          {snapshot.pair} • {snapshot.interval} • mode {mode} • uptime {tick}s • auto{' '}
-          {autoTrade ? 'on' : 'off'}
-        </Text>
-      </Box>
+    <Box flexDirection="column">
+      <Box flexDirection="column">
+        <Panel title="Market" width={panelWidth}>
+          {line(
+            'pair',
+            <>
+              <Badge label={snapshot.trend.label.toUpperCase()} color={trendColor} /> <Text dimColor>{snapshot.pair}</Text>
+            </>,
+            6
+          )}
+          {line(
+            'ohlc',
+            <>
+              o <Text color="#f8f8f2">{price(openPrice)}</Text> h{' '}
+              <Text color="#f8f8f2">{price(Number.isFinite(highPrice) ? highPrice : null)}</Text> l{' '}
+              <Text color="#f8f8f2">{price(Number.isFinite(lowPrice) ? lowPrice : null)}</Text> c{' '}
+              <Text color={numberTone(change)}>{price(lastPrice)}</Text>
+            </>,
+            6
+          )}
+          {line('bars', <Text color="#8be9fd">{marketCandles.length}</Text>, 6)}
+          {line(
+            'now',
+            <>
+              cur <Text color={numberTone(liveState.currentPrice ?? lastPrice)}>{price(liveState.currentPrice ?? lastPrice)}</Text> chg{' '}
+              <Text color={numberTone(change)}>{pct(change)}</Text> rng <Text color="#f8f8f2">{price(rangeValue)}</Text> rsi{' '}
+              <Text color={snapshot.trend.rsi14 !== null ? '#f1fa8c' : '#8b949e'}>{price(snapshot.trend.rsi14)}</Text>
+            </>,
+            6
+          )}
+          {line(
+            'ema',
+            <>
+              20 <Text color="#8be9fd">{price(ema20)}</Text> 50 <Text color="#8be9fd">{price(ema50)}</Text> 100{' '}
+              <Text color="#8be9fd">{price(ema100)}</Text> 200 <Text color="#8be9fd">{price(ema200)}</Text>
+            </>,
+            6
+          )}
+          {line(
+            'hl',
+            <>
+              atr <Text color="#f1fa8c">{price(snapshot.trend.atr14)}</Text> sup <Text color="#50fa7b">{price(support)}</Text> res{' '}
+              <Text color="#ff6b6b">{price(resistance)}</Text>
+            </>,
+            6
+          )}
+        </Panel>
 
-      <Box flexDirection="row">
-        <Box flexDirection="column" width={27}>
-          <Panel title="Market">
-            <Box flexDirection="column">
-              <Text>
-                <Badge label={snapshot.trend.label.toUpperCase()} color={trendColor} />{' '}
-                <Text dimColor>structure</Text>
-              </Text>
-              <Box marginTop={1}>
-                <StatLine label="price" value={price(lastPrice)} />
-                <StatLine label="24h" value={pct(change)} color={change >= 0 ? '#41d3a2' : '#ff7b72'} />
-                <StatLine label="rsi14" value={price(snapshot.trend.rsi14)} />
-                <StatLine label="atr14" value={price(snapshot.trend.atr14)} />
-              </Box>
-              <Box marginTop={1}>
-                <Text dimColor>{snapshot.trend.reasons[0] ?? 'market is warming up'}</Text>
-              </Box>
+        {watchMode ? (
+          <Box marginTop={0}>
+            <Panel title="Status" width={panelWidth}>
+              {line('view', <Text color="#8be9fd">{`${mode.toUpperCase()} ${view.toUpperCase()}`}</Text>, 14)}
+              {line('auto-trade', <Text color={autoTrade ? '#50fa7b' : '#ff6b6b'}>{autoTrade ? 'on' : 'off'}</Text>, 14)}
+              {line('bot-state', <Text color={botStateLabel === 'idle' ? '#c9d1d9' : '#8be9fd'}>{botStateLabel}</Text>, 14)}
+              {line('open-orders', <Text color="#f1fa8c">{openOrderCount}</Text>, 14)}
+              {line('open-positions', <Text color="#f1fa8c">{openPositionCount}</Text>, 14)}
+            </Panel>
+          </Box>
+        ) : (
+          <>
+            <Box marginTop={1}>
+              <Panel title="Setup" width={panelWidth}>
+                {line(
+                  'bias',
+                  <>
+                    <Badge label={snapshot.setup.label.toUpperCase()} color={setupColor} /> <Text dimColor>{snapshot.setup.grade}</Text>
+                  </>,
+                  6
+                )}
+                {line(
+                  'zone',
+                  <>
+                    entry <Text color="#50fa7b">{price(snapshot.setup.entryMid)}</Text> stop <Text color="#ff6b6b">{price(snapshot.setup.stopLoss)}</Text> tp{' '}
+                    <Text color="#f1fa8c">{price(snapshot.setup.takeProfit)}</Text>
+                  </>,
+                  6
+                )}
+                {line(
+                  'risk',
+                  <>
+                    r/r{' '}
+                    <Text color={snapshot.setup.riskReward !== null ? '#f1fa8c' : '#8b949e'}>
+                      {snapshot.setup.riskReward !== null ? `1:${snapshot.setup.riskReward.toFixed(2)}` : 'n/a'}
+                    </Text>{' '}
+                    mode <Text color="#8be9fd">{snapshot.setup.pathMode}</Text>
+                  </>,
+                  6
+                )}
+                {line('path', compact(snapshot.setup.path.map((step) => `${step.label}:${step.status}`).join(' / ')), 6)}
+              </Panel>
             </Box>
-          </Panel>
-        </Box>
 
-        <Box width={1} />
-
-        <Box flexDirection="column" width={30}>
-          <Panel title="Setup">
-            <Box flexDirection="column">
-              <Text>
-                <Badge label={snapshot.setup.label.toUpperCase()} color={setupColor} />{' '}
-                <Text dimColor>bias</Text>
-              </Text>
-              <Box marginTop={1}>
-                <StatLine label="grade" value={snapshot.setup.grade} />
-                <StatLine label="entry" value={price(snapshot.setup.entryMid)} />
-                <StatLine label="stop" value={price(snapshot.setup.stopLoss)} color="#ff7b72" />
-                <StatLine label="target" value={price(snapshot.setup.takeProfit)} color="#41d3a2" />
-                <StatLine label="r/r" value={riskReward} />
-              </Box>
-              <Box marginTop={1} flexDirection="column">
-                <SectionTitle text="Path" />
-                <Text dimColor>
-                  {snapshot.setup.path.map((step) => `${step.label}:${step.status}`).join('  ')}
-                </Text>
-              </Box>
+            <Box marginTop={1}>
+              <Panel title="Exec" width={panelWidth}>
+                {line('mode', <Text color="#8be9fd">{mode.toUpperCase()}</Text>, 14)}
+                {line('auto', <Text color={autoTrade ? '#50fa7b' : '#ff6b6b'}>{autoTrade ? 'on' : 'off'}</Text>, 14)}
+                {line('view', <Text color="#8be9fd">{view.toUpperCase()}</Text>, 14)}
+                {line('bot', <Text color={botStateLabel === 'idle' ? '#c9d1d9' : '#8be9fd'}>{botStateLabel}</Text>, 14)}
+                {line('ord', <Text color="#f1fa8c">{openOrderCount} open</Text>, 14)}
+                {line('pos', <Text color="#f1fa8c">{openPositionCount} open</Text>, 14)}
+              </Panel>
             </Box>
-          </Panel>
-        </Box>
 
-        <Box width={1} />
-
-        <Box flexDirection="column" width={24}>
-          <Panel title="Execution">
-            <TradeRow label="mode" value={mode.toUpperCase()} accent="#7ee7ff" />
-            <TradeRow label="auto" value={autoTrade ? 'enabled' : 'disabled'} accent={autoTrade ? '#41d3a2' : '#8b949e'} />
-            <TradeRow label="support" value={price(snapshot.supportResistance?.support ?? null)} />
-            <TradeRow label="resistance" value={price(snapshot.supportResistance?.resistance ?? null)} />
-            <TradeRow label="stop dist" value={price(stopDistance)} />
-            <TradeRow label="target dist" value={price(targetDistance)} />
-          </Panel>
-        </Box>
-      </Box>
-
-      <Box marginTop={0} flexDirection="row">
-        <Box flexDirection="column" width={40}>
-          <Panel title="Trade Plan">
-            <Box flexDirection="column">
-              <SectionTitle text="Playbook" />
-              <Text>
-                <Text color="#8b949e">1.</Text> Break structure cleanly.
-              </Text>
-              <Text>
-                <Text color="#8b949e">2.</Text> Wait for retest confirmation.
-              </Text>
-              <Text>
-                <Text color="#8b949e">3.</Text> Scale out into liquidity.
-              </Text>
-              <Text>
-                <Text color="#8b949e">4.</Text> Move stop to breakeven after TP1.
-              </Text>
-
-              <Box marginTop={1} flexDirection="column">
-                <SectionTitle text="Targets" />
-                {snapshot.setup.takeProfits.map((takeProfit) => (
-                  <Text key={takeProfit.label}>
-                    <Text color="#8b949e">{takeProfit.label}</Text>{' '}
-                    <Text color="#f5f5f5">{price(takeProfit.price)}</Text>
-                  </Text>
-                ))}
-              </Box>
+            <Box marginTop={1}>
+              <Panel title="Core" width={panelWidth}>
+                {line(
+                  'exch',
+                  liveState.exchangeInfoSummary
+                    ? <>
+                        sym <Text color="#8be9fd">{liveState.exchangeInfoSummary.tradingSymbolCount}</Text>/<Text color="#8be9fd">{liveState.exchangeInfoSummary.symbolCount}</Text> perp{' '}
+                        <Text color="#8be9fd">{liveState.exchangeInfoSummary.perpetualSymbolCount}</Text>
+                      </>
+                    : 'exchange unavailable'
+                )}
+                {line('watch', <Text color="#f8f8f2">{renderList(liveState.overview?.data.slice(0, 3).map((item) => item.symbol) ?? [], 'overview unavailable')}</Text>)}
+                {line(
+                  'candles',
+                  liveState.symbolDetail?.data.candles.length
+                    ? <>
+                        <Text color="#8be9fd">{liveState.symbolDetail.data.candles.length}</Text> bars current{' '}
+                        <Text color={numberTone(liveState.currentPrice)}>{price(liveState.currentPrice)}</Text>
+                      </>
+                    : 'candles unavailable'
+                )}
+              </Panel>
             </Box>
-          </Panel>
-        </Box>
 
-        <Box width={1} />
-
-        <Box flexDirection="column" width={40}>
-          <Panel title="Diagnostics">
-            <Box flexDirection="column">
-              <TradeRow label="uptime" value={`${tick}s`} />
-              <TradeRow label="trend score" value={`${snapshot.trend.score}`} accent={trendColor} />
-              <TradeRow label="bias" value={snapshot.setup.direction.toUpperCase()} accent={setupColor} />
-              <TradeRow
-                label="range"
-                value={`${price(snapshot.supportResistance?.support ?? null)} - ${price(snapshot.supportResistance?.resistance ?? null)}`}
-              />
+            <Box marginTop={1}>
+              <Panel title="Bot / Orders" width={panelWidth}>
+                {line('bot', liveState.bot ? `${liveState.bot.status} ${liveState.bot.planSource ?? 'n/a'}` : 'idle')}
+                {line('log', liveState.botLogs.at(-1)?.message ?? 'no bot log yet')}
+                {line(
+                  'orders',
+                  liveState.openOrders ? (
+                    <>
+                      <Text color="#8be9fd">{liveState.openOrders[0].length}</Text> reg / <Text color="#8be9fd">{liveState.openOrders[1].length}</Text> algo
+                    </>
+                  ) : (
+                    'orders unavailable'
+                  )
+                )}
+                {line(
+                  'pos',
+                  liveState.openPositions?.length ? (
+                    <>
+                      <Text color="#8be9fd">{liveState.openPositions.slice(0, 2).map((position) => `${position.symbol}:${position.positionSide}`).join(' • ')}</Text>
+                    </>
+                  ) : (
+                    'no positions'
+                  )
+                )}
+                {line(
+                  'pnl',
+                  liveState.realizedPnlHistory?.length ? (
+                    <>
+                      <Text color="#8be9fd">
+                        {liveState.realizedPnlHistory.slice(0, 2).map((item) => `${item.symbol}:${price(item.income)}`).join(' • ')}
+                      </Text>
+                    </>
+                  ) : (
+                    'no pnl history'
+                  )
+                )}
+              </Panel>
             </Box>
-          </Panel>
-        </Box>
+          </>
+        )}
       </Box>
     </Box>
   );

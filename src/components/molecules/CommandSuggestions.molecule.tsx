@@ -31,12 +31,12 @@ export function CommandSuggestions({
         return (
           <Box key={suggestion.command} flexDirection="row">
             <Box width={12} marginRight={2}>
-              <Text color={isSelected ? '#7ee7ff' : '#8b949e'} bold={isSelected}>
+              <Text color={isSelected ? '#8be9fd' : '#8b949e'} bold={isSelected}>
                 {suggestion.command}
               </Text>
             </Box>
             <Box flexGrow={1}>
-              <Text color={isSelected ? '#7ee7ff' : '#8b949e'} bold={isSelected}>
+              <Text color={isSelected ? '#f8f8f2' : '#c9d1d9'} bold={isSelected}>
                 {suggestion.description}
               </Text>
             </Box>

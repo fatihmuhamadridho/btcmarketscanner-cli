@@ -9,9 +9,12 @@
     "paths": {
       "@components/*": ["components/*"],
       "@configs/*": ["configs/*"],
+      "@core/*": ["core/*"],
+      "@features/*": ["features/*"],
       "@interfaces/*": ["interfaces/*"],
       "@lib/*": ["lib/*"],
-      "@services/*": ["services/*"]
+      "@services/*": ["services/*"],
+      "@utils/*": ["utils/*"]
     },
     "types": ["node"],
     "strict": true,

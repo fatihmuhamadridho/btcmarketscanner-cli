@@ -1,4 +1,4 @@
-import type { CommandResult, TerminalMode, TerminalState } from '@interfaces/terminal.interface';
+import type { CommandResult, TerminalMode, TerminalState, TerminalView } from '@interfaces/terminal.interface';
 
 function parsePrice(raw: string) {
   const value = Number(raw.replace(/,/g, ''));
@@ -23,6 +23,7 @@ export function getDefaultTerminalState(): TerminalState {
       },
     },
     mode: 'swing',
+    view: 'overview',
     watchlist: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'],
     showHelp: false,
     history: [
@@ -45,6 +46,9 @@ export function formatAvailableCommands() {
     { command: '/tp2', example: '68000', description: 'set the second take profit target for scaled exits' },
     { command: '/tp3', example: '69000', description: 'set the third take profit target for the final exit' },
     { command: '/auto', example: 'on|off|toggle', description: 'enable or disable automated trade execution logic' },
+    { command: '/view', example: 'overview|market|bot|orders|history', description: 'switch the terminal panel focus for futures data' },
+    { command: '/refresh', example: '', description: 'force a live data reload from the futures core' },
+    { command: '/bot', example: 'start|stop|toggle', description: 'control the local futures bot state' },
     { command: '/help', example: '', description: 'show the available slash commands and their usage' },
     { command: '/clear', example: '', description: 'clear the command history from the terminal view' },
   ];
@@ -78,6 +82,54 @@ export function applyTerminalCommand(input: string, current: TerminalState): Com
       state: { showHelp: true },
       kind: 'system',
       message: 'Help opened.',
+    };
+  }
+
+  if (lowerCommand === 'view') {
+    const nextView = arg.toLowerCase() as TerminalView;
+    if (!['overview', 'market', 'bot', 'orders', 'history'].includes(nextView)) {
+      return {
+        state: {},
+        kind: 'error',
+        message: 'Usage: /view overview|market|bot|orders|history',
+      };
+    }
+
+    return {
+      state: { view: nextView, showHelp: false },
+      kind: 'system',
+      message: `View set to ${nextView}.`,
+      refresh: true,
+    };
+  }
+
+  if (lowerCommand === 'refresh') {
+    return {
+      state: {},
+      kind: 'system',
+      message: 'Live data refresh requested.',
+      refresh: true,
+    };
+  }
+
+  if (lowerCommand === 'bot') {
+    const next = arg.toLowerCase();
+    if (!['start', 'stop', 'toggle'].includes(next)) {
+      return {
+        state: {},
+        kind: 'error',
+        message: 'Usage: /bot start|stop|toggle',
+      };
+    }
+
+    return {
+      state: {
+        autoTrade: next === 'toggle' ? !current.autoTrade : next === 'start',
+        showHelp: false,
+      },
+      kind: 'system',
+      message: `Bot ${next === 'stop' ? 'stopped' : next === 'start' ? 'started' : current.autoTrade ? 'stopped' : 'started'}.`,
+      refresh: true,
     };
   }
 
