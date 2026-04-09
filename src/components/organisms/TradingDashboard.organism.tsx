@@ -1,11 +1,11 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import { Badge } from '../atoms/Badge.atom.js';
-import { SectionTitle } from '../atoms/SectionTitle.atom.js';
-import { StatLine } from '../atoms/StatLine.atom.js';
-import { Panel } from '../molecules/Panel.molecule.js';
-import { TradeRow } from '../molecules/TradeRow.molecule.js';
-import type { MarketMode, MarketSnapshot } from '../../interfaces/market.interface.js';
+import { Badge } from '@components/atoms/Badge.atom';
+import { SectionTitle } from '@components/atoms/SectionTitle.atom';
+import { StatLine } from '@components/atoms/StatLine.atom';
+import { Panel } from '@components/molecules/Panel.molecule';
+import { TradeRow } from '@components/molecules/TradeRow.molecule';
+import type { MarketMode, MarketSnapshot } from '@interfaces/market.interface';
 
 function pct(value: number | null) {
   if (value === null || Number.isNaN(value)) return 'n/a';

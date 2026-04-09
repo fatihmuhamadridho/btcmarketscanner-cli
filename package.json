@@ -8,8 +8,8 @@
     "ai-agent": "./src/index.tsx"
   },
   "scripts": {
-    "dev": "pnpm run deps:dev && pnpm run deps:sync && node --watch --watch-preserve-output --import tsx src/index.tsx",
-    "start": "tsx src/index.tsx",
+    "dev": "NODE_ENV=development node --watch --watch-preserve-output --import tsx --import ./src/env.ts src/index.tsx",
+    "start": "NODE_ENV=production node --import tsx --import ./src/env.ts src/index.tsx",
     "prepare": "husky",
     "deps:dev": "node ./scripts/switch-core-dependency.mjs workspace",
     "deps:prod": "node ./scripts/switch-core-dependency.mjs github",
@@ -20,7 +20,9 @@
   "license": "ISC",
   "packageManager": "pnpm@10.33.0",
   "dependencies": {
+    "axios": "^1.15.0",
     "btcmarketscanner-core": "github:fatihmuhamadridho/btcmarketscanner-core#master",
+    "dotenv": "^17.4.1",
     "ink": "^6.8.0",
     "react": "^19.2.4"
   },

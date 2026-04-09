@@ -1,7 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import { Panel } from './Panel.molecule.js';
-import type { TerminalHistoryItem } from '../../interfaces/terminal.interface.js';
+import { Panel } from '@components/molecules/Panel.molecule';
+import type { TerminalHistoryItem } from '@interfaces/terminal.interface';
 
 function tone(kind: TerminalHistoryItem['kind']) {
   if (kind === 'error') return '#ff7b72';

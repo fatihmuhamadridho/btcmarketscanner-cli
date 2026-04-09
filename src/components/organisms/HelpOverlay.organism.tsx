@@ -1,7 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import { Panel } from '../molecules/Panel.molecule.js';
-import { formatAvailableCommands } from '../../lib/command-parser.js';
+import { Panel } from '@components/molecules/Panel.molecule';
+import { formatAvailableCommands } from '@lib/command-parser';
 
 export function HelpOverlay() {
   return (

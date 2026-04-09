@@ -1,4 +1,4 @@
-import type { CommandResult, TerminalMode, TerminalState } from '../interfaces/terminal.interface.js';
+import type { CommandResult, TerminalMode, TerminalState } from '@interfaces/terminal.interface';
 
 function parsePrice(raw: string) {
   const value = Number(raw.replace(/,/g, ''));

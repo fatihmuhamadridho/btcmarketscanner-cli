@@ -1,14 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Box, Text, render, useApp, useInput } from 'ink';
 import { analyzeSetupSide, analyzeTrend, getSupportResistance, type SetupCandle } from 'btcmarketscanner-core';
-import { CommandBar } from './components/molecules/CommandBar.molecule.js';
-import { CommandHistory } from './components/molecules/CommandHistory.molecule.js';
-import { CommandSuggestions } from './components/molecules/CommandSuggestions.molecule.js';
-import { HelpOverlay } from './components/organisms/HelpOverlay.organism.js';
-import { TradingDashboard } from './components/organisms/TradingDashboard.organism.js';
-import type { MarketSnapshot } from './interfaces/market.interface.js';
-import type { TerminalState } from './interfaces/terminal.interface.js';
-import { applyTerminalCommand, formatAvailableCommands, getDefaultTerminalState } from './lib/command-parser.js';
+import { CommandBar } from '@components/molecules/CommandBar.molecule';
+import { CommandHistory } from '@components/molecules/CommandHistory.molecule';
+import { CommandSuggestions } from '@components/molecules/CommandSuggestions.molecule';
+import { HelpOverlay } from '@components/organisms/HelpOverlay.organism';
+import { TradingDashboard } from '@components/organisms/TradingDashboard.organism';
+import type { MarketSnapshot } from '@interfaces/market.interface';
+import type { TerminalState } from '@interfaces/terminal.interface';
+import { applyTerminalCommand, formatAvailableCommands, getDefaultTerminalState } from '@lib/command-parser';
 
 const candleSeed: SetupCandle[] = [
   { openTime: 1, high: 64510, low: 64180, close: 64420, volume: 1840 },
