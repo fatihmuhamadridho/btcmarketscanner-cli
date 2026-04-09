@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+set -e
+
+cd "$(dirname "$0")/.."
+pnpm run deps:prod
+pnpm run deps:sync
