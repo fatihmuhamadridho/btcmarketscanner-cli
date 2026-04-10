@@ -11,7 +11,7 @@ export class WebsocketService {
         if (path.startsWith("ws://") || path.startsWith("wss://")) {
             return path;
         }
-        const baseUrl = this.options.baseURL ?? BASE_API_WEBSOCKET_BINANCE ?? DEFAULT_FUTURES_WEBSOCKET_BASE_URL;
+        const baseUrl = this.options.baseURL ?? BASE_API_WEBSOCKET_BINANCE() ?? DEFAULT_FUTURES_WEBSOCKET_BASE_URL;
         const normalizedBaseUrl = baseUrl.endsWith("/")
             ? baseUrl.slice(0, -1)
             : baseUrl;

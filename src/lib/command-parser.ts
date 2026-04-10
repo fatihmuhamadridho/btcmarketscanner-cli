@@ -23,6 +23,7 @@ export function getDefaultTerminalState(): TerminalState {
       },
     },
     mode: 'swing',
+    showProfilePanel: false,
     watchPickerOpen: false,
     watchPickerSelectedIndex: 0,
     view: 'overview',
@@ -40,6 +41,7 @@ export function getDefaultTerminalState(): TerminalState {
 
 export function formatAvailableCommands() {
   return [
+    { command: '/profile', example: 'on|off|toggle', description: 'toggle the profile panel with account and credential details' },
     { command: '/watch', example: 'BTCUSDT', description: 'open the live symbol picker or switch to a specific market symbol' },
     { command: '/mode', example: 'scalp|swing|position', description: 'change how the scanner interprets market structure and risk' },
     { command: '/entry', example: '65300', description: 'set the planned entry price for the current setup' },
@@ -84,6 +86,30 @@ export function applyTerminalCommand(input: string, current: TerminalState): Com
       state: { showHelp: true },
       kind: 'system',
       message: 'Help opened.',
+    };
+  }
+
+  if (lowerCommand === 'profile') {
+    const next = arg.toLowerCase();
+    if (!['on', 'off', 'toggle', ''].includes(next)) {
+      return {
+        state: {},
+        kind: 'error',
+        message: 'Usage: /profile on|off|toggle',
+      };
+    }
+
+    return {
+      state: {
+        showProfilePanel:
+          next === 'toggle'
+            ? !current.showProfilePanel
+            : next === 'off'
+              ? false
+              : true,
+      },
+      kind: 'system',
+      message: `Profile panel ${next === 'off' || (next === 'toggle' && current.showProfilePanel) ? 'hidden' : 'shown'}.`,
     };
   }
 

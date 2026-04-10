@@ -5,7 +5,7 @@ import { GetFuturesExchangeInfoSummaryUseCase } from './futuresExchangeInfo.usec
 export class FuturesExchangeInfoController {
     getFuturesExchangeInfoSummaryUseCase;
     constructor() {
-        const axiosService = new AxiosService({ baseURL: BASE_API_BINANCE });
+        const axiosService = new AxiosService({ baseURL: BASE_API_BINANCE() });
         const repository = new FuturesExchangeInfoRepositoryImpl(axiosService);
         this.getFuturesExchangeInfoSummaryUseCase = new GetFuturesExchangeInfoSummaryUseCase(repository);
     }

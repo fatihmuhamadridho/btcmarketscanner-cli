@@ -14,5 +14,5 @@ export class FuturesMarketRepositoryImpl {
     }
 }
 export function createFuturesMarketRepository() {
-    return new FuturesMarketRepositoryImpl(new AxiosService({ baseURL: getBinanceFuturesBaseUrl(BASE_API_BINANCE) }));
+    return new FuturesMarketRepositoryImpl(new AxiosService({ baseURL: getBinanceFuturesBaseUrl(BASE_API_BINANCE()) }));
 }

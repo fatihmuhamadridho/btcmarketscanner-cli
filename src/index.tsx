@@ -1,6 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Box, Text, render, useApp, useInput } from 'ink';
+import { Box, Text, render, useInput } from 'ink';
 import { analyzeSetupSide, analyzeTrend, getSupportResistance } from 'btcmarketscanner-core';
+import {
+  BINANCE_API_KEY,
+  BINANCE_SECRET_KEY,
+  getBinanceCredentialSource,
+  getBinanceProfileLabel,
+  getRuntimeMode,
+  setRuntimeConfig,
+} from '@configs/base.config';
 import { CommandBar } from '@components/molecules/CommandBar.molecule';
 import { CommandHistory } from '@components/molecules/CommandHistory.molecule';
 import { CommandSuggestions } from '@components/molecules/CommandSuggestions.molecule';
@@ -12,6 +20,7 @@ import { futuresAutoTradeService } from '@core/binance/futures/bot/infrastructur
 import { FuturesExchangeInfoController } from '@core/binance/futures/exchange-info/domain/futuresExchangeInfo.controller';
 import { FuturesMarketController } from '@core/binance/futures/market/domain/futuresMarket.controller';
 import { WebsocketService } from '@services/websocket.service';
+import { ensureOnboardedConfig } from '@services/onboarding.service';
 import type { MarketMode, MarketSnapshot, LiveMarketState } from '@interfaces/market.interface';
 import type { TerminalState } from '@interfaces/terminal.interface';
 import { applyTerminalCommand, formatAvailableCommands, getDefaultTerminalState } from '@lib/command-parser';
@@ -19,6 +28,18 @@ import { applyTerminalCommand, formatAvailableCommands, getDefaultTerminalState 
 const futuresMarketController = new FuturesMarketController();
 const futuresExchangeInfoController = new FuturesExchangeInfoController();
 const futuresPriceWebsocketService = new WebsocketService();
+
+function restoreInteractiveTerminal() {
+  if (!process.stdin.isTTY) {
+    return;
+  }
+
+  if (typeof process.stdin.setRawMode === 'function') {
+    process.stdin.setRawMode(true);
+  }
+
+  process.stdin.resume();
+}
 
 function buildMarketSnapshotFromLive(terminal: TerminalState, live: LiveMarketState): MarketSnapshot | null {
   if (live.initialCandles.length === 0) {
@@ -104,7 +125,13 @@ function formatDateAgo(value: string | null) {
   if (Number.isNaN(timestamp)) return 'n/a';
 
   const elapsedSeconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (elapsedSeconds < 2) return 'just now';
   return `${elapsedSeconds}s ago`;
+}
+
+function formatSecret(value: string) {
+  if (!value) return 'n/a';
+  return value;
 }
 
 function buildWatchPickerItems(liveState: LiveMarketState, watchlist: string[]): WatchPickerItem[] {
@@ -280,7 +307,6 @@ function parseLiveTradePrice(rawMessage: unknown, symbol: string) {
 }
 
 function App() {
-  const { exit } = useApp();
   const terminalHeight = process.stdout.rows ?? 43;
   const terminalWidth = process.stdout.columns ?? 80;
   const [tick, setTick] = useState(0);
@@ -309,8 +335,26 @@ function App() {
   });
   const [refreshToken, setRefreshToken] = useState(0);
 
+  useEffect(() => {
+    const handleSigint = () => {
+      futuresPriceWebsocketService.close();
+      process.exit(0);
+    };
+    process.on('SIGINT', handleSigint);
+
+    return () => {
+      process.off('SIGINT', handleSigint);
+    };
+  }, []);
+
   useInput((input: string, key) => {
     if (terminal.watchPickerOpen) {
+      if (key.ctrl && input === 'c') {
+        futuresPriceWebsocketService.close();
+        process.exit(0);
+        return;
+      }
+
       if (key.escape) {
         setTerminal((current) => ({ ...current, watchPickerOpen: false, watchPickerSelectedIndex: 0 }));
         setWatchPickerQuery('');
@@ -369,26 +413,33 @@ function App() {
     }
 
     if (key.escape && commandInput.length === 0) {
-      exit();
+      futuresPriceWebsocketService.close();
+      process.exit(0);
       return;
     }
 
     if (input === 'q' && commandInput.length === 0) {
-      exit();
+      futuresPriceWebsocketService.close();
+      process.exit(0);
       return;
     }
 
     if (key.return) {
-      if (commandSuggestions.length > 0 && commandInput.trim().startsWith('/')) {
-        const selectedSuggestion = commandSuggestions[selectedSuggestionIndex] ?? commandSuggestions[0];
-        if (selectedSuggestion && commandInput.trim() === '/') {
-          setCommandInput(selectedSuggestion.command);
-          setSelectedSuggestionIndex(0);
-          return;
+      let commandToRun = commandInput;
+
+      if (commandInput.trim().startsWith('/')) {
+        if (commandSuggestions.length === 1) {
+          commandToRun = commandSuggestions[0].command;
+        }
+        else if (commandSuggestions.length > 0) {
+          const selectedSuggestion = commandSuggestions[selectedSuggestionIndex] ?? commandSuggestions[0];
+          if (selectedSuggestion && commandInput.trim() === '/') {
+            commandToRun = selectedSuggestion.command;
+          }
         }
       }
 
-      const result = applyTerminalCommand(commandInput, terminal);
+      const result = applyTerminalCommand(commandToRun, terminal);
 
       setTerminal((current) => {
         const nextLevels = result.state.levels
@@ -410,7 +461,7 @@ function App() {
           history: [
             ...current.history,
             {
-              input: commandInput,
+              input: commandToRun,
               kind: result.kind ?? 'system',
               message: result.message,
             },
@@ -440,7 +491,8 @@ function App() {
     }
 
     if (key.ctrl && input === 'c') {
-      exit();
+      futuresPriceWebsocketService.close();
+      process.exit(0);
       return;
     }
 
@@ -701,6 +753,11 @@ function App() {
     () => filterWatchPickerItems(watchPickerItems, watchPickerQuery),
     [watchPickerItems, watchPickerQuery]
   );
+  const credentialSource = getBinanceCredentialSource();
+  const runtimeMode = getRuntimeMode();
+  const profileLabel = getBinanceProfileLabel();
+  const apiKey = BINANCE_API_KEY();
+  const secretKey = BINANCE_SECRET_KEY();
 
   return (
     <Box flexDirection="column" padding={1} height={terminalHeight}>
@@ -716,6 +773,12 @@ function App() {
           <Text color="#8be9fd" bold>
             {terminal.activeSymbol}
           </Text>{' '}
+          <Text color="#8b949e">profile: </Text>
+          <Text color={credentialSource === 'env' ? '#50fa7b' : credentialSource === 'json' ? '#8be9fd' : '#ff6b6b'}>
+            {credentialSource}
+          </Text>{' '}
+          <Text color="#8b949e">runtime: </Text>
+          <Text color="#f1fa8c">{runtimeMode}</Text>{' '}
           <Text color="#8b949e">interval: </Text>
           <Text color="#f1fa8c">{terminal.mode === 'scalp' ? '5m' : terminal.mode === 'swing' ? '1h' : '4h'}</Text>{' '}
           <Text color="#8b949e">mode: </Text>
@@ -780,6 +843,33 @@ function App() {
         ) : null}
         {liveState.error ? null : terminal.history.length > 1 ? <CommandHistory items={terminal.history} width={panelWidth} /> : null}
         {liveState.error ? null : terminal.showHelp ? <HelpOverlay width={panelWidth} /> : null}
+        {terminal.showProfilePanel ? (
+          <Box borderStyle="round" borderColor="#8be9fd" paddingX={1} paddingY={0}>
+            <Box flexDirection="column">
+              <Text color="#8be9fd" bold>
+                Profile
+              </Text>
+              <Text>
+                <Text color="#8b949e">account: </Text>
+                <Text color="#f1fa8c">{profileLabel}</Text>
+              </Text>
+              <Text>
+                <Text color="#8b949e">source: </Text>
+                <Text color={credentialSource === 'env' ? '#50fa7b' : credentialSource === 'json' ? '#8be9fd' : '#ff6b6b'}>
+                  {credentialSource}
+                </Text>
+              </Text>
+              <Text>
+                <Text color="#8b949e">api key: </Text>
+                <Text color="#c9d1d9">{apiKey || 'n/a'}</Text>
+              </Text>
+              <Text>
+                <Text color="#8b949e">secret: </Text>
+                <Text color="#c9d1d9">{formatSecret(secretKey)}</Text>
+              </Text>
+            </Box>
+          </Box>
+        ) : null}
         {terminal.watchPickerOpen ? (
           <WatchPicker
             items={filteredWatchPickerItems}
@@ -822,4 +912,11 @@ function App() {
   );
 }
 
-render(<App />);
+async function bootstrap() {
+  const config = await ensureOnboardedConfig();
+  setRuntimeConfig(config);
+  restoreInteractiveTerminal();
+  render(<App />);
+}
+
+void bootstrap();

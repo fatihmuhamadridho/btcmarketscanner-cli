@@ -1,4 +1,4 @@
-const DEFAULT_DEMO_FUTURES_BASE_URL = 'https://demo-fapi.binance.com/fapi/v1';
+const DEFAULT_DEMO_FUTURES_BASE_URL = 'https://demo-api.binance.com/api/v3';
 const DEFAULT_LIVE_FUTURES_BASE_URL = 'https://fapi.binance.com/fapi/v1';
 
 function normalizeBaseUrl(value: string) {

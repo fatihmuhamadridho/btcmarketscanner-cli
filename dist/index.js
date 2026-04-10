@@ -1,7 +1,8 @@
 import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import React, { useEffect, useMemo, useState } from 'react';
-import { Box, Text, render, useApp, useInput } from 'ink';
+import { Box, Text, render, useInput } from 'ink';
 import { analyzeSetupSide, analyzeTrend, getSupportResistance } from 'btcmarketscanner-core';
+import { BINANCE_API_KEY, BINANCE_SECRET_KEY, getBinanceCredentialSource, getBinanceProfileLabel, getRuntimeMode, setRuntimeConfig, } from './configs/base.config.js';
 import { CommandBar } from './components/molecules/CommandBar.molecule.js';
 import { CommandHistory } from './components/molecules/CommandHistory.molecule.js';
 import { CommandSuggestions } from './components/molecules/CommandSuggestions.molecule.js';
@@ -13,10 +14,20 @@ import { futuresAutoTradeService } from './core/binance/futures/bot/infrastructu
 import { FuturesExchangeInfoController } from './core/binance/futures/exchange-info/domain/futuresExchangeInfo.controller.js';
 import { FuturesMarketController } from './core/binance/futures/market/domain/futuresMarket.controller.js';
 import { WebsocketService } from './services/websocket.service.js';
+import { ensureOnboardedConfig } from './services/onboarding.service.js';
 import { applyTerminalCommand, formatAvailableCommands, getDefaultTerminalState } from './lib/command-parser.js';
 const futuresMarketController = new FuturesMarketController();
 const futuresExchangeInfoController = new FuturesExchangeInfoController();
 const futuresPriceWebsocketService = new WebsocketService();
+function restoreInteractiveTerminal() {
+    if (!process.stdin.isTTY) {
+        return;
+    }
+    if (typeof process.stdin.setRawMode === 'function') {
+        process.stdin.setRawMode(true);
+    }
+    process.stdin.resume();
+}
 function buildMarketSnapshotFromLive(terminal, live) {
     if (live.initialCandles.length === 0) {
         return null;
@@ -97,7 +108,14 @@ function formatDateAgo(value) {
     if (Number.isNaN(timestamp))
         return 'n/a';
     const elapsedSeconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+    if (elapsedSeconds < 2)
+        return 'just now';
     return `${elapsedSeconds}s ago`;
+}
+function formatSecret(value) {
+    if (!value)
+        return 'n/a';
+    return value;
 }
 function buildWatchPickerItems(liveState, watchlist) {
     const marketItems = liveState.overview?.data ?? [];
@@ -232,7 +250,6 @@ function parseLiveTradePrice(rawMessage, symbol) {
     }
 }
 function App() {
-    const { exit } = useApp();
     const terminalHeight = process.stdout.rows ?? 43;
     const terminalWidth = process.stdout.columns ?? 80;
     const [tick, setTick] = useState(0);
@@ -260,8 +277,23 @@ function App() {
         websocketLastEventAt: null,
     });
     const [refreshToken, setRefreshToken] = useState(0);
+    useEffect(() => {
+        const handleSigint = () => {
+            futuresPriceWebsocketService.close();
+            process.exit(0);
+        };
+        process.on('SIGINT', handleSigint);
+        return () => {
+            process.off('SIGINT', handleSigint);
+        };
+    }, []);
     useInput((input, key) => {
         if (terminal.watchPickerOpen) {
+            if (key.ctrl && input === 'c') {
+                futuresPriceWebsocketService.close();
+                process.exit(0);
+                return;
+            }
             if (key.escape) {
                 setTerminal((current) => ({ ...current, watchPickerOpen: false, watchPickerSelectedIndex: 0 }));
                 setWatchPickerQuery('');
@@ -315,23 +347,29 @@ function App() {
             return;
         }
         if (key.escape && commandInput.length === 0) {
-            exit();
+            futuresPriceWebsocketService.close();
+            process.exit(0);
             return;
         }
         if (input === 'q' && commandInput.length === 0) {
-            exit();
+            futuresPriceWebsocketService.close();
+            process.exit(0);
             return;
         }
         if (key.return) {
-            if (commandSuggestions.length > 0 && commandInput.trim().startsWith('/')) {
-                const selectedSuggestion = commandSuggestions[selectedSuggestionIndex] ?? commandSuggestions[0];
-                if (selectedSuggestion && commandInput.trim() === '/') {
-                    setCommandInput(selectedSuggestion.command);
-                    setSelectedSuggestionIndex(0);
-                    return;
+            let commandToRun = commandInput;
+            if (commandInput.trim().startsWith('/')) {
+                if (commandSuggestions.length === 1) {
+                    commandToRun = commandSuggestions[0].command;
+                }
+                else if (commandSuggestions.length > 0) {
+                    const selectedSuggestion = commandSuggestions[selectedSuggestionIndex] ?? commandSuggestions[0];
+                    if (selectedSuggestion && commandInput.trim() === '/') {
+                        commandToRun = selectedSuggestion.command;
+                    }
                 }
             }
-            const result = applyTerminalCommand(commandInput, terminal);
+            const result = applyTerminalCommand(commandToRun, terminal);
             setTerminal((current) => {
                 const nextLevels = result.state.levels
                     ? {
@@ -351,7 +389,7 @@ function App() {
                     history: [
                         ...current.history,
                         {
-                            input: commandInput,
+                            input: commandToRun,
                             kind: result.kind ?? 'system',
                             message: result.message,
                         },
@@ -376,7 +414,8 @@ function App() {
             return;
         }
         if (key.ctrl && input === 'c') {
-            exit();
+            futuresPriceWebsocketService.close();
+            process.exit(0);
             return;
         }
         if (input === '?') {
@@ -602,6 +641,17 @@ function App() {
     const panelWidth = Math.max(40, terminalWidth - 2);
     const watchPickerItems = useMemo(() => buildWatchPickerItems(liveState, terminal.watchlist), [liveState.overview, terminal.watchlist]);
     const filteredWatchPickerItems = useMemo(() => filterWatchPickerItems(watchPickerItems, watchPickerQuery), [watchPickerItems, watchPickerQuery]);
-    return (_jsxs(Box, { flexDirection: "column", padding: 1, height: terminalHeight, children: [_jsxs(Box, { flexDirection: "column", children: [_jsxs(Text, { children: [_jsx(Text, { color: "#8be9fd", bold: true, children: "BTC Market Scanner" }), ' ', _jsx(Text, { color: "#c9d1d9", children: "command terminal" })] }), _jsxs(Text, { children: [_jsx(Text, { color: "#8b949e", children: "pair: " }), _jsx(Text, { color: "#8be9fd", bold: true, children: terminal.activeSymbol }), ' ', _jsx(Text, { color: "#8b949e", children: "interval: " }), _jsx(Text, { color: "#f1fa8c", children: terminal.mode === 'scalp' ? '5m' : terminal.mode === 'swing' ? '1h' : '4h' }), ' ', _jsx(Text, { color: "#8b949e", children: "mode: " }), _jsx(Text, { color: "#8be9fd", children: terminal.mode }), ' ', _jsx(Text, { color: "#8b949e", children: "auto: " }), _jsx(Text, { color: terminal.autoTrade ? '#50fa7b' : '#ff6b6b', children: terminal.autoTrade ? 'on' : 'off' }), ' ', _jsx(Text, { color: "#8b949e", children: "view: " }), _jsx(Text, { color: "#8be9fd", children: terminal.view }), ' ', _jsx(Text, { color: "#8b949e", children: "uptime: " }), _jsxs(Text, { color: "#f1fa8c", children: [tick, "s"] })] }), _jsxs(Text, { children: [_jsx(Text, { color: "#8b949e", children: "market " }), _jsx(Text, { color: snapshot?.trend.direction === 'bullish' ? '#50fa7b' : snapshot?.trend.direction === 'bearish' ? '#ff6b6b' : '#c9d1d9', bold: true, children: snapshot?.trend.label ?? 'loading' }), ' ', _jsx(Text, { color: "#8b949e", children: "ws: " }), _jsx(Text, { color: liveState.websocketConnected ? '#50fa7b' : '#ff6b6b', children: liveState.websocketConnected ? 'open' : 'closed' }), ' ', _jsx(Text, { color: "#8b949e", children: "help: " }), _jsx(Text, { color: terminal.showHelp ? '#8be9fd' : '#8b949e', children: terminal.showHelp ? 'on' : 'off' }), ' ', _jsx(Text, { color: "#8b949e", children: "live: " }), _jsx(Text, { color: liveState.loading ? '#f1fa8c' : liveState.error ? '#ff6b6b' : '#50fa7b', children: liveState.loading ? 'loading' : liveState.error ? 'error' : 'ready' })] }), snapshot && !liveState.error ? (_jsxs(_Fragment, { children: [_jsxs(Text, { children: [_jsx(Text, { color: "#8b949e", children: "support: " }), _jsx(Text, { color: "#50fa7b", children: formatPrice(snapshot.supportResistance?.support ?? null) }), ' ', _jsx(Text, { color: "#8b949e", children: "resistance: " }), _jsx(Text, { color: "#ff6b6b", children: formatPrice(snapshot.supportResistance?.resistance ?? null) }), ' ', _jsx(Text, { color: "#8b949e", children: "price: " }), _jsx(Text, { color: liveState.currentPrice !== null ? '#8be9fd' : '#8b949e', children: formatPrice(liveState.currentPrice) }), _jsx(Text, { color: "#8b949e", children: " ws: " }), _jsx(Text, { color: "#8be9fd", children: liveState.websocketLastEventAt ? formatDateAgo(liveState.websocketLastEventAt) : 'n/a' })] }), _jsxs(Text, { children: [_jsx(Text, { color: "#8b949e", children: "setup: " }), _jsx(Text, { color: snapshot.setup.direction === 'long' ? '#50fa7b' : '#ff6b6b', children: snapshot.setup.label }), ' ', _jsx(Text, { color: "#8b949e", children: "grade: " }), _jsx(Text, { color: "#f1fa8c", children: snapshot.setup.grade }), ' ', _jsx(Text, { color: "#8b949e", children: "r/r: " }), _jsx(Text, { color: snapshot.setup.riskReward !== null ? '#8be9fd' : '#8b949e', children: snapshot.setup.riskReward !== null ? `1:${snapshot.setup.riskReward.toFixed(2)}` : 'n/a' })] })] })) : null, liveState.error ? (_jsx(Box, { borderStyle: "round", borderColor: "#ff7b72", paddingX: 1, paddingY: 0, children: _jsxs(Text, { children: [_jsx(Text, { color: "#ff7b72", bold: true, children: "live api error" }), _jsx(Text, { children: ' ' }), _jsx(Text, { dimColor: true, children: liveState.error })] }) })) : null, liveState.error ? null : terminal.history.length > 1 ? _jsx(CommandHistory, { items: terminal.history, width: panelWidth }) : null, liveState.error ? null : terminal.showHelp ? _jsx(HelpOverlay, { width: panelWidth }) : null, terminal.watchPickerOpen ? (_jsx(WatchPicker, { items: filteredWatchPickerItems, selectedIndex: Math.min(terminal.watchPickerSelectedIndex, Math.max(0, filteredWatchPickerItems.length - 1)), query: watchPickerQuery, width: panelWidth })) : null] }), liveState.error ? null : snapshot ? (_jsx(TradingDashboard, { snapshot: snapshot, mode: terminal.mode, tick: tick, autoTrade: terminal.autoTrade, liveState: liveState, view: terminal.view, panelWidth: panelWidth })) : null, _jsx(Box, { flexGrow: 1 }), _jsxs(Box, { flexDirection: "column", children: [_jsx(CommandBar, { value: commandInput, width: panelWidth }), commandSuggestions.length > 0 ? (_jsx(CommandSuggestions, { suggestions: commandSuggestions, selectedIndex: selectedSuggestionIndex })) : null, commandInput.length === 0 ? (_jsx(Box, { paddingX: 1, children: _jsx(Text, { dimColor: true, children: "Press `?` for help. `q` or `esc` exits when input is empty." }) })) : null] })] }));
+    const credentialSource = getBinanceCredentialSource();
+    const runtimeMode = getRuntimeMode();
+    const profileLabel = getBinanceProfileLabel();
+    const apiKey = BINANCE_API_KEY();
+    const secretKey = BINANCE_SECRET_KEY();
+    return (_jsxs(Box, { flexDirection: "column", padding: 1, height: terminalHeight, children: [_jsxs(Box, { flexDirection: "column", children: [_jsxs(Text, { children: [_jsx(Text, { color: "#8be9fd", bold: true, children: "BTC Market Scanner" }), ' ', _jsx(Text, { color: "#c9d1d9", children: "command terminal" })] }), _jsxs(Text, { children: [_jsx(Text, { color: "#8b949e", children: "pair: " }), _jsx(Text, { color: "#8be9fd", bold: true, children: terminal.activeSymbol }), ' ', _jsx(Text, { color: "#8b949e", children: "profile: " }), _jsx(Text, { color: credentialSource === 'env' ? '#50fa7b' : credentialSource === 'json' ? '#8be9fd' : '#ff6b6b', children: credentialSource }), ' ', _jsx(Text, { color: "#8b949e", children: "runtime: " }), _jsx(Text, { color: "#f1fa8c", children: runtimeMode }), ' ', _jsx(Text, { color: "#8b949e", children: "interval: " }), _jsx(Text, { color: "#f1fa8c", children: terminal.mode === 'scalp' ? '5m' : terminal.mode === 'swing' ? '1h' : '4h' }), ' ', _jsx(Text, { color: "#8b949e", children: "mode: " }), _jsx(Text, { color: "#8be9fd", children: terminal.mode }), ' ', _jsx(Text, { color: "#8b949e", children: "auto: " }), _jsx(Text, { color: terminal.autoTrade ? '#50fa7b' : '#ff6b6b', children: terminal.autoTrade ? 'on' : 'off' }), ' ', _jsx(Text, { color: "#8b949e", children: "view: " }), _jsx(Text, { color: "#8be9fd", children: terminal.view }), ' ', _jsx(Text, { color: "#8b949e", children: "uptime: " }), _jsxs(Text, { color: "#f1fa8c", children: [tick, "s"] })] }), _jsxs(Text, { children: [_jsx(Text, { color: "#8b949e", children: "market " }), _jsx(Text, { color: snapshot?.trend.direction === 'bullish' ? '#50fa7b' : snapshot?.trend.direction === 'bearish' ? '#ff6b6b' : '#c9d1d9', bold: true, children: snapshot?.trend.label ?? 'loading' }), ' ', _jsx(Text, { color: "#8b949e", children: "ws: " }), _jsx(Text, { color: liveState.websocketConnected ? '#50fa7b' : '#ff6b6b', children: liveState.websocketConnected ? 'open' : 'closed' }), ' ', _jsx(Text, { color: "#8b949e", children: "help: " }), _jsx(Text, { color: terminal.showHelp ? '#8be9fd' : '#8b949e', children: terminal.showHelp ? 'on' : 'off' }), ' ', _jsx(Text, { color: "#8b949e", children: "live: " }), _jsx(Text, { color: liveState.loading ? '#f1fa8c' : liveState.error ? '#ff6b6b' : '#50fa7b', children: liveState.loading ? 'loading' : liveState.error ? 'error' : 'ready' })] }), snapshot && !liveState.error ? (_jsxs(_Fragment, { children: [_jsxs(Text, { children: [_jsx(Text, { color: "#8b949e", children: "support: " }), _jsx(Text, { color: "#50fa7b", children: formatPrice(snapshot.supportResistance?.support ?? null) }), ' ', _jsx(Text, { color: "#8b949e", children: "resistance: " }), _jsx(Text, { color: "#ff6b6b", children: formatPrice(snapshot.supportResistance?.resistance ?? null) }), ' ', _jsx(Text, { color: "#8b949e", children: "price: " }), _jsx(Text, { color: liveState.currentPrice !== null ? '#8be9fd' : '#8b949e', children: formatPrice(liveState.currentPrice) }), _jsx(Text, { color: "#8b949e", children: " ws: " }), _jsx(Text, { color: "#8be9fd", children: liveState.websocketLastEventAt ? formatDateAgo(liveState.websocketLastEventAt) : 'n/a' })] }), _jsxs(Text, { children: [_jsx(Text, { color: "#8b949e", children: "setup: " }), _jsx(Text, { color: snapshot.setup.direction === 'long' ? '#50fa7b' : '#ff6b6b', children: snapshot.setup.label }), ' ', _jsx(Text, { color: "#8b949e", children: "grade: " }), _jsx(Text, { color: "#f1fa8c", children: snapshot.setup.grade }), ' ', _jsx(Text, { color: "#8b949e", children: "r/r: " }), _jsx(Text, { color: snapshot.setup.riskReward !== null ? '#8be9fd' : '#8b949e', children: snapshot.setup.riskReward !== null ? `1:${snapshot.setup.riskReward.toFixed(2)}` : 'n/a' })] })] })) : null, liveState.error ? (_jsx(Box, { borderStyle: "round", borderColor: "#ff7b72", paddingX: 1, paddingY: 0, children: _jsxs(Text, { children: [_jsx(Text, { color: "#ff7b72", bold: true, children: "live api error" }), _jsx(Text, { children: ' ' }), _jsx(Text, { dimColor: true, children: liveState.error })] }) })) : null, liveState.error ? null : terminal.history.length > 1 ? _jsx(CommandHistory, { items: terminal.history, width: panelWidth }) : null, liveState.error ? null : terminal.showHelp ? _jsx(HelpOverlay, { width: panelWidth }) : null, terminal.showProfilePanel ? (_jsx(Box, { borderStyle: "round", borderColor: "#8be9fd", paddingX: 1, paddingY: 0, children: _jsxs(Box, { flexDirection: "column", children: [_jsx(Text, { color: "#8be9fd", bold: true, children: "Profile" }), _jsxs(Text, { children: [_jsx(Text, { color: "#8b949e", children: "account: " }), _jsx(Text, { color: "#f1fa8c", children: profileLabel })] }), _jsxs(Text, { children: [_jsx(Text, { color: "#8b949e", children: "source: " }), _jsx(Text, { color: credentialSource === 'env' ? '#50fa7b' : credentialSource === 'json' ? '#8be9fd' : '#ff6b6b', children: credentialSource })] }), _jsxs(Text, { children: [_jsx(Text, { color: "#8b949e", children: "api key: " }), _jsx(Text, { color: "#c9d1d9", children: apiKey || 'n/a' })] }), _jsxs(Text, { children: [_jsx(Text, { color: "#8b949e", children: "secret: " }), _jsx(Text, { color: "#c9d1d9", children: formatSecret(secretKey) })] })] }) })) : null, terminal.watchPickerOpen ? (_jsx(WatchPicker, { items: filteredWatchPickerItems, selectedIndex: Math.min(terminal.watchPickerSelectedIndex, Math.max(0, filteredWatchPickerItems.length - 1)), query: watchPickerQuery, width: panelWidth })) : null] }), liveState.error ? null : snapshot ? (_jsx(TradingDashboard, { snapshot: snapshot, mode: terminal.mode, tick: tick, autoTrade: terminal.autoTrade, liveState: liveState, view: terminal.view, panelWidth: panelWidth })) : null, _jsx(Box, { flexGrow: 1 }), _jsxs(Box, { flexDirection: "column", children: [_jsx(CommandBar, { value: commandInput, width: panelWidth }), commandSuggestions.length > 0 ? (_jsx(CommandSuggestions, { suggestions: commandSuggestions, selectedIndex: selectedSuggestionIndex })) : null, commandInput.length === 0 ? (_jsx(Box, { paddingX: 1, children: _jsx(Text, { dimColor: true, children: "Press `?` for help. `q` or `esc` exits when input is empty." }) })) : null] })] }));
 }
-render(_jsx(App, {}));
+async function bootstrap() {
+    const config = await ensureOnboardedConfig();
+    setRuntimeConfig(config);
+    restoreInteractiveTerminal();
+    render(_jsx(App, {}));
+}
+void bootstrap();

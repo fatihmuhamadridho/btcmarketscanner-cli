@@ -11,7 +11,7 @@ export class FetchService {
 
   constructor(options?: FetchServiceOptions) {
     this.options = {
-      baseURL: options?.baseURL ?? BASE_API_BINANCE ?? '',
+      baseURL: options?.baseURL ?? BASE_API_BINANCE() ?? '',
       defaultHeaders: options?.defaultHeaders ?? { 'Content-Type': 'application/json' },
       cookieHeader: options?.cookieHeader ?? '',
     };

@@ -7,7 +7,7 @@ export class FuturesExchangeInfoController {
   private readonly getFuturesExchangeInfoSummaryUseCase: GetFuturesExchangeInfoSummaryUseCase;
 
   constructor() {
-    const axiosService = new AxiosService({ baseURL: BASE_API_BINANCE });
+    const axiosService = new AxiosService({ baseURL: BASE_API_BINANCE() });
     const repository = new FuturesExchangeInfoRepositoryImpl(axiosService);
     this.getFuturesExchangeInfoSummaryUseCase = new GetFuturesExchangeInfoSummaryUseCase(repository);
   }

@@ -3,8 +3,8 @@ import { BASE_API_BINANCE, BINANCE_API_KEY, BINANCE_SECRET_KEY } from '../../../
 import { getBinanceFuturesBaseUrl } from '../../../../../configs/binance-futures-url.js';
 import { FuturesMarketController } from '../../market/domain/futuresMarket.controller.js';
 const futuresMarketController = new FuturesMarketController();
-function buildBaseUrl() { return getBinanceFuturesBaseUrl(BASE_API_BINANCE); }
-function signQueryString(queryString) { return createHmac('sha256', BINANCE_SECRET_KEY ?? '').update(queryString).digest('hex'); }
+function buildBaseUrl() { return getBinanceFuturesBaseUrl(BASE_API_BINANCE()); }
+function signQueryString(queryString) { return createHmac('sha256', BINANCE_SECRET_KEY() ?? '').update(queryString).digest('hex'); }
 function roundDownToStep(value, step) { if (!Number.isFinite(value) || !Number.isFinite(step) || step <= 0)
     return value; const precision = Math.max(0, (step.toString().split('.')[1]?.length ?? 0) + 2); return Number((Math.floor(value / step) * step).toFixed(precision)); }
 function normalizePrice(value, tickSize, precision) { if (Number.isFinite(tickSize) && tickSize > 0)
@@ -23,13 +23,13 @@ function isProtectionOrderType(type) { return Boolean(type && (type.includes('ST
 function matchesPositionSide(orderPositionSide, positionSide) { return !positionSide || positionSide === 'BOTH' ? true : orderPositionSide === positionSide || orderPositionSide === 'BOTH'; }
 function getEntryLimitPrice(plan, currentPrice) { return plan.entryMid ?? (plan.direction === 'long' ? plan.entryZone.high : plan.entryZone.low) ?? currentPrice; }
 export class FuturesAutoTradeService {
-    async request(path, options = {}) { if (!BINANCE_API_KEY || !BINANCE_SECRET_KEY)
+    async request(path, options = {}) { if (!BINANCE_API_KEY() || !BINANCE_SECRET_KEY())
         throw new Error('Binance credentials are missing.'); const { method = 'GET', params = {}, signed = false } = options; const url = new URL(path, buildBaseUrl()); const searchParams = new URLSearchParams(); Object.entries(params).forEach(([key, value]) => { if (value === undefined || value === null)
         return; searchParams.set(key, String(value)); }); if (signed) {
         searchParams.set('recvWindow', '5000');
         searchParams.set('timestamp', String(Date.now()));
         searchParams.set('signature', signQueryString(searchParams.toString()));
-    } url.search = searchParams.toString(); const response = await fetch(url.toString(), { method, headers: { 'Content-Type': 'application/json', 'X-MBX-APIKEY': BINANCE_API_KEY, 'User-Agent': 'binance-algo/1.1.0 (Skill)', Accept: 'application/json' } }); if (!response.ok) {
+    } url.search = searchParams.toString(); const response = await fetch(url.toString(), { method, headers: { 'Content-Type': 'application/json', 'X-MBX-APIKEY': BINANCE_API_KEY(), 'User-Agent': 'binance-algo/1.1.0 (Skill)', Accept: 'application/json' } }); if (!response.ok) {
         const errorText = await response.text();
         throw new Error(errorText || `Binance request failed with status ${response.status}`);
     } return (await response.json()); }

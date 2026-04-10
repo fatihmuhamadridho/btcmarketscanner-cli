@@ -13,7 +13,7 @@ export class AxiosService {
     this.options = { ...options };
 
     this.client = axios.create({
-      baseURL: this.options.baseURL ?? BASE_API_BINANCE ?? '',
+      baseURL: this.options.baseURL ?? BASE_API_BINANCE() ?? '',
     });
   }
 
