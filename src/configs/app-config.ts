@@ -32,10 +32,7 @@ export function getBinanceWebsocketBaseUrl() {
 }
 
 export function hasBinanceCredentials(config: AppConfigFile) {
-  return Boolean(
-    config.auth.profiles.binance.api_key.trim() &&
-    config.auth.profiles.binance.secret_key.trim(),
-  );
+  return Boolean(config.auth.profiles.binance.api_key.trim() && config.auth.profiles.binance.secret_key.trim());
 }
 
 export function normalizeConfig(input?: Partial<AppConfigFile> | null): AppConfigFile {

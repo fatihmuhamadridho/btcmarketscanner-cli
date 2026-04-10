@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       btcmarketscanner-core:
-        specifier: github:fatihmuhamadridho/btcmarketscanner-core#v0.0.3
-        version: https://codeload.github.com/fatihmuhamadridho/btcmarketscanner-core/tar.gz/94d212ca22fc9371a5a35efee9934f45d19c3431
+        specifier: workspace:*
+        version: link:../core
       ink:
         specifier: ^6.8.0
         version: 6.8.0(@types/react@19.2.14)(react@19.2.4)

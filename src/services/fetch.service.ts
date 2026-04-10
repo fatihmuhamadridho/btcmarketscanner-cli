@@ -46,7 +46,7 @@ export class FetchService {
     method: string,
     url: string,
     body?: B,
-    headers?: Record<string, string>
+    headers?: Record<string, string>,
   ): Promise<T> {
     const response = await fetch(this.buildUrl(url), {
       method,

@@ -1,13 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 
-export function CommandBar({
-  value,
-  width,
-}: {
-  value: string;
-  width?: number;
-}) {
+export function CommandBar({ value, width }: { value: string; width?: number }) {
   const placeholder = 'Enter command';
   const hasValue = value.length > 0;
   const shownValue = hasValue ? value.slice(-60) : '';

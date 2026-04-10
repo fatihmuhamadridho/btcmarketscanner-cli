@@ -1,4 +1,7 @@
-import type { CoinValidationSnapshot, CoinValidationSnapshotSetupCandidate } from '../interface/CoinValidationSnapshot.interface';
+import type {
+  CoinValidationSnapshot,
+  CoinValidationSnapshotSetupCandidate,
+} from '../interface/CoinValidationSnapshot.interface';
 import type { CoinSetupDetail } from '../interface/CoinView.interface';
 
 export function buildCoinValidationSnapshot(params: {
@@ -19,7 +22,18 @@ export function buildCoinValidationSnapshot(params: {
   isPerpetual: boolean;
   leverage: number;
   symbol: string;
-  timeframeSources: Record<'4h' | '1h' | '15m' | '1m', Array<{ open: number; high: number; low: number; close: number; volume: number; openTime: number; closeTime?: number }>>;
+  timeframeSources: Record<
+    '4h' | '1h' | '15m' | '1m',
+    Array<{
+      open: number;
+      high: number;
+      low: number;
+      close: number;
+      volume: number;
+      openTime: number;
+      closeTime?: number;
+    }>
+  >;
   timeframeSupportResistance: Array<{
     interval: '4h' | '1h' | '15m' | '1m';
     supportResistance: { support: number | null; resistance: number | null } | null;
@@ -71,10 +85,74 @@ export function buildCoinValidationSnapshot(params: {
       '4h': 'macro_soft',
     },
     timeframes: {
-      '1m': { atr14: null, candles: [], current_price: null, distance_to_resistance: null, distance_to_support: null, ema100: null, ema20: null, ema200: null, ema50: null, ema_alignment: 'neutral', resistance: null, rsi14: null, structure_state: 'Mixed', support: null, trend_state: 'sideways' },
-      '15m': { atr14: null, candles: [], current_price: null, distance_to_resistance: null, distance_to_support: null, ema100: null, ema20: null, ema200: null, ema50: null, ema_alignment: 'neutral', resistance: null, rsi14: null, structure_state: 'Mixed', support: null, trend_state: 'sideways' },
-      '1h': { atr14: null, candles: [], current_price: null, distance_to_resistance: null, distance_to_support: null, ema100: null, ema20: null, ema200: null, ema50: null, ema_alignment: 'neutral', resistance: null, rsi14: null, structure_state: 'Mixed', support: null, trend_state: 'sideways' },
-      '4h': { atr14: null, candles: [], current_price: null, distance_to_resistance: null, distance_to_support: null, ema100: null, ema20: null, ema200: null, ema50: null, ema_alignment: 'neutral', resistance: null, rsi14: null, structure_state: 'Mixed', support: null, trend_state: 'sideways' },
+      '1m': {
+        atr14: null,
+        candles: [],
+        current_price: null,
+        distance_to_resistance: null,
+        distance_to_support: null,
+        ema100: null,
+        ema20: null,
+        ema200: null,
+        ema50: null,
+        ema_alignment: 'neutral',
+        resistance: null,
+        rsi14: null,
+        structure_state: 'Mixed',
+        support: null,
+        trend_state: 'sideways',
+      },
+      '15m': {
+        atr14: null,
+        candles: [],
+        current_price: null,
+        distance_to_resistance: null,
+        distance_to_support: null,
+        ema100: null,
+        ema20: null,
+        ema200: null,
+        ema50: null,
+        ema_alignment: 'neutral',
+        resistance: null,
+        rsi14: null,
+        structure_state: 'Mixed',
+        support: null,
+        trend_state: 'sideways',
+      },
+      '1h': {
+        atr14: null,
+        candles: [],
+        current_price: null,
+        distance_to_resistance: null,
+        distance_to_support: null,
+        ema100: null,
+        ema20: null,
+        ema200: null,
+        ema50: null,
+        ema_alignment: 'neutral',
+        resistance: null,
+        rsi14: null,
+        structure_state: 'Mixed',
+        support: null,
+        trend_state: 'sideways',
+      },
+      '4h': {
+        atr14: null,
+        candles: [],
+        current_price: null,
+        distance_to_resistance: null,
+        distance_to_support: null,
+        ema100: null,
+        ema20: null,
+        ema200: null,
+        ema50: null,
+        ema_alignment: 'neutral',
+        resistance: null,
+        rsi14: null,
+        structure_state: 'Mixed',
+        support: null,
+        trend_state: 'sideways',
+      },
     },
     validation_rules: {
       min_rr: 2,

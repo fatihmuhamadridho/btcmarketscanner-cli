@@ -9,7 +9,9 @@
   },
   "scripts": {
     "build": "node ./scripts/build.mjs",
-    "dev": "NODE_ENV=development node --watch --watch-preserve-output --import tsx --import ./src/env.ts src/index.tsx",
+    "dev": "NODE_ENV=development tsx --import ./src/env.ts src/index.tsx",
+    "format": "prettier --write \"src/**/*.{ts,tsx,json,md,cjs,mjs}\" \"*.{json,md}\"",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,json,md,cjs,mjs}\" \"*.{json,md}\"",
     "start": "NODE_ENV=production node dist/index.js",
     "prepare": "husky",
     "deps:dev": "node ./scripts/switch-core-dependency.mjs workspace",
@@ -31,6 +33,7 @@
     "@types/node": "^25.5.2",
     "@types/react": "^19.2.14",
     "husky": "^9.1.7",
+    "prettier": "^3.6.2",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   }

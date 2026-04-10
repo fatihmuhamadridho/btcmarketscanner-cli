@@ -1,17 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Box, Text, render, useInput } from 'ink';
 import { analyzeSetupSide, analyzeTrend, getSupportResistance } from 'btcmarketscanner-core';
-import {
-  BINANCE_API_KEY,
-  BINANCE_SECRET_KEY,
-  getBinanceCredentialSource,
-  getBinanceProfileLabel,
-  getRuntimeMode,
-  setRuntimeConfig,
-} from '@configs/base.config';
+import { getBinanceProfileLabel, getRuntimeMode, setRuntimeConfig } from '@configs/base.config';
+import { BotLogs } from '@components/molecules/BotLogs.molecule';
 import { CommandBar } from '@components/molecules/CommandBar.molecule';
 import { CommandHistory } from '@components/molecules/CommandHistory.molecule';
+import { IntervalPicker, type IntervalPickerItem } from '@components/molecules/IntervalPicker.molecule';
 import { CommandSuggestions } from '@components/molecules/CommandSuggestions.molecule';
+import { SetupMenu } from '@components/molecules/SetupMenu.molecule';
+import { SetupPicker } from '@components/molecules/SetupPicker.molecule';
 import { WatchPicker, type WatchPickerItem } from '@components/molecules/WatchPicker.molecule';
 import { HelpOverlay } from '@components/organisms/HelpOverlay.organism';
 import { TradingDashboard } from '@components/organisms/TradingDashboard.organism';
@@ -23,7 +20,13 @@ import { WebsocketService } from '@services/websocket.service';
 import { ensureOnboardedConfig } from '@services/onboarding.service';
 import type { MarketMode, MarketSnapshot, LiveMarketState } from '@interfaces/market.interface';
 import type { TerminalState } from '@interfaces/terminal.interface';
-import { applyTerminalCommand, formatAvailableCommands, getDefaultTerminalState } from '@lib/command-parser';
+import {
+  applyTerminalCommand,
+  formatAvailableCommands,
+  getDefaultTerminalState,
+  SETUP_LEVERAGE_OPTIONS,
+  SETUP_MENU_OPTIONS,
+} from '@lib/command-parser';
 
 const futuresMarketController = new FuturesMarketController();
 const futuresExchangeInfoController = new FuturesExchangeInfoController();
@@ -41,12 +44,44 @@ function restoreInteractiveTerminal() {
   process.stdin.resume();
 }
 
+function isWatchMode() {
+  return process.execArgv.includes('--watch') || process.execArgv.includes('--watch-path');
+}
+
+function exitTerminalApp(code = 0) {
+  futuresPriceWebsocketService.close();
+
+  if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
+    process.stdin.setRawMode(false);
+  }
+
+  process.stdin.pause();
+
+  if (isWatchMode() && process.ppid > 1) {
+    try {
+      process.kill(process.ppid, 'SIGTERM');
+    } catch {
+      // Ignore if the parent process is already gone.
+    }
+
+    try {
+      process.kill(process.ppid, 'SIGKILL');
+    } catch {
+      // Ignore if the parent process is already gone.
+    }
+  }
+
+  process.exit(code);
+}
+
 function buildMarketSnapshotFromLive(terminal: TerminalState, live: LiveMarketState): MarketSnapshot | null {
-  if (live.initialCandles.length === 0) {
+  const activeCandles = live.symbolDetail?.data.candles.length ? live.symbolDetail.data.candles : live.initialCandles;
+
+  if (activeCandles.length === 0) {
     return null;
   }
 
-  const candles = live.initialCandles.map((candle) => ({
+  const candles = activeCandles.map((candle) => ({
     openTime: candle.openTime,
     high: candle.high,
     low: candle.low,
@@ -54,6 +89,8 @@ function buildMarketSnapshotFromLive(terminal: TerminalState, live: LiveMarketSt
     volume: candle.volume,
   }));
   const supportResistance = getSupportResistance(candles, 10);
+  const strongSupportResistance =
+    getSupportResistance(candles, Math.max(20, Math.min(50, candles.length))) ?? supportResistance;
   const trend = analyzeTrend(candles, supportResistance);
   const setupSide = trend.direction === 'bullish' ? 'long' : 'short';
   const setup = analyzeSetupSide(setupSide, candles, trend, supportResistance);
@@ -61,15 +98,16 @@ function buildMarketSnapshotFromLive(terminal: TerminalState, live: LiveMarketSt
   return {
     candles,
     pair: terminal.activeSymbol,
-    interval: terminal.mode === 'scalp' ? '5m' : terminal.mode === 'swing' ? '1h' : '4h',
+    interval: terminal.mode,
     mode: terminal.mode,
     supportResistance,
+    strongSupportResistance,
     trend,
     setup,
   };
 }
 
-function buildAutoBotPlan(snapshot: MarketSnapshot, currentPrice: number) {
+function buildAutoBotPlan(snapshot: MarketSnapshot, currentPrice: number, leverage: number) {
   return {
     allocationUnit: 'percent' as const,
     allocationValue: 10,
@@ -77,17 +115,32 @@ function buildAutoBotPlan(snapshot: MarketSnapshot, currentPrice: number) {
     direction: snapshot.setup.direction,
     entryMid: snapshot.setup.entryMid,
     entryZone: snapshot.setup.entryZone,
-    leverage: 5,
+    leverage,
     notes: snapshot.setup.reasons,
     riskReward: snapshot.setup.riskReward,
     setupGrade: snapshot.setup.grade,
     setupGradeRank: snapshot.setup.gradeRank,
     setupLabel: snapshot.setup.label,
-    setupType: (snapshot.setup.pathMode === 'breakout' ? 'breakout_retest' : 'continuation') as 'breakout_retest' | 'continuation',
+    setupType: (snapshot.setup.pathMode === 'breakout' ? 'breakout_retest' : 'continuation') as
+      | 'breakout_retest'
+      | 'continuation',
     stopLoss: snapshot.setup.stopLoss,
     symbol: snapshot.pair,
     takeProfits: snapshot.setup.takeProfits,
   };
+}
+
+const INTERVAL_ITEMS: IntervalPickerItem[] = [
+  { interval: '1m', label: '1m', description: 'fast trigger view' },
+  { interval: '5m', label: '5m', description: 'short intraday view' },
+  { interval: '15m', label: '15m', description: 'setup anchor view' },
+  { interval: '1h', label: '1h', description: 'primary bias view' },
+  { interval: '4h', label: '4h', description: 'macro context view' },
+];
+
+function getIntervalIndex(interval: string) {
+  const index = INTERVAL_ITEMS.findIndex((item) => item.interval === interval);
+  return index >= 0 ? index : 2;
 }
 
 function formatCompactVolume(value: string | undefined) {
@@ -104,13 +157,19 @@ function formatPrice(value: number | null) {
 
   const absoluteValue = Math.abs(value);
   const decimals =
-    absoluteValue >= 1000 ? 2 :
-    absoluteValue >= 100 ? 3 :
-    absoluteValue >= 1 ? 4 :
-    absoluteValue >= 0.1 ? 5 :
-    absoluteValue >= 0.01 ? 6 :
-    absoluteValue >= 0.001 ? 8 :
-    10;
+    absoluteValue >= 1000
+      ? 2
+      : absoluteValue >= 100
+        ? 3
+        : absoluteValue >= 1
+          ? 4
+          : absoluteValue >= 0.1
+            ? 5
+            : absoluteValue >= 0.01
+              ? 6
+              : absoluteValue >= 0.001
+                ? 8
+                : 10;
 
   return value.toLocaleString('en-US', {
     minimumFractionDigits: 0,
@@ -129,18 +188,19 @@ function formatDateAgo(value: string | null) {
   return `${elapsedSeconds}s ago`;
 }
 
-function formatSecret(value: string) {
-  if (!value) return 'n/a';
-  return value;
+function parseBalance(value?: string | null) {
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatBalance(value: number | null) {
+  return value === null ? 'n/a' : `${value.toFixed(2)} USDT`;
 }
 
 function buildWatchPickerItems(liveState: LiveMarketState, watchlist: string[]): WatchPickerItem[] {
   const marketItems = liveState.overview?.data ?? [];
-  const marketMap = new Map(
-    marketItems
-      .filter((item) => item.symbol)
-      .map((item) => [item.symbol, item] as const),
-  );
+  const marketMap = new Map(marketItems.filter((item) => item.symbol).map((item) => [item.symbol, item] as const));
   const watchlisted = watchlist
     .map((symbol) => marketMap.get(symbol))
     .filter((item): item is NonNullable<(typeof marketItems)[number]> => Boolean(item));
@@ -183,7 +243,9 @@ async function loadCandlesWithHistory(symbol: string, intervals: string[], targe
 
   for (const interval of intervals) {
     try {
-      const initial = await futuresMarketController.getMarketInitialCandles(symbol, interval, targetCount).then((res) => res.data);
+      const initial = await futuresMarketController
+        .getMarketInitialCandles(symbol, interval, targetCount)
+        .then((res) => res.data);
       if (initial.length === 0) {
         continue;
       }
@@ -192,7 +254,9 @@ async function loadCandlesWithHistory(symbol: string, intervals: string[], targe
       let cursor = candles[0]?.openTime ?? null;
 
       while (candles.length < targetCount && cursor !== null) {
-        const older = await futuresMarketController.getOlderMarketCandles(symbol, cursor, interval, Math.min(200, targetCount - candles.length)).catch(() => []);
+        const older = await futuresMarketController
+          .getOlderMarketCandles(symbol, cursor, interval, Math.min(200, targetCount - candles.length))
+          .catch(() => []);
         if (older.length === 0) break;
         candles.unshift(...older);
         cursor = older[0]?.openTime ?? null;
@@ -315,6 +379,8 @@ function App() {
   const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(0);
   const [watchPickerQuery, setWatchPickerQuery] = useState('');
   const [liveState, setLiveState] = useState<LiveMarketState>({
+    account: null,
+    profileDebug: null,
     exchangeInfoSummary: null,
     overview: null,
     symbolSnapshot: null,
@@ -337,8 +403,7 @@ function App() {
 
   useEffect(() => {
     const handleSigint = () => {
-      futuresPriceWebsocketService.close();
-      process.exit(0);
+      exitTerminalApp(0);
     };
     process.on('SIGINT', handleSigint);
 
@@ -348,6 +413,139 @@ function App() {
   }, []);
 
   useInput((input: string, key) => {
+    if (terminal.setupMenuOpen) {
+      if (key.ctrl && input === 'c') {
+        exitTerminalApp(0);
+        return;
+      }
+
+      if (key.escape) {
+        setTerminal((current) => ({ ...current, setupMenuOpen: false, setupMenuSelectedIndex: 0 }));
+        return;
+      }
+
+      if (key.upArrow || key.downArrow) {
+        setTerminal((current) => ({
+          ...current,
+          setupMenuSelectedIndex: key.upArrow
+            ? current.setupMenuSelectedIndex <= 0
+              ? SETUP_MENU_OPTIONS.length - 1
+              : current.setupMenuSelectedIndex - 1
+            : current.setupMenuSelectedIndex >= SETUP_MENU_OPTIONS.length - 1
+              ? 0
+              : current.setupMenuSelectedIndex + 1,
+        }));
+        return;
+      }
+
+      if (key.return) {
+        const selectedItem = SETUP_MENU_OPTIONS[terminal.setupMenuSelectedIndex] ?? SETUP_MENU_OPTIONS[0];
+        if (selectedItem?.key === 'leverage') {
+          setTerminal((current) => ({
+            ...current,
+            setupMenuOpen: false,
+            setupMenuSelectedIndex: 0,
+            setupPickerOpen: true,
+            setupPickerSelectedIndex: Math.max(
+              0,
+              SETUP_LEVERAGE_OPTIONS.findIndex((option) => option.leverage === current.leverage),
+            ),
+          }));
+        }
+        return;
+      }
+
+      return;
+    }
+
+    if (terminal.setupPickerOpen) {
+      if (key.ctrl && input === 'c') {
+        exitTerminalApp(0);
+        return;
+      }
+
+      if (key.escape) {
+        setTerminal((current) => ({ ...current, setupPickerOpen: false, setupPickerSelectedIndex: 0 }));
+        return;
+      }
+
+      if (key.upArrow || key.downArrow) {
+        setTerminal((current) => ({
+          ...current,
+          setupPickerSelectedIndex: key.upArrow
+            ? current.setupPickerSelectedIndex <= 0
+              ? SETUP_LEVERAGE_OPTIONS.length - 1
+              : current.setupPickerSelectedIndex - 1
+            : current.setupPickerSelectedIndex >= SETUP_LEVERAGE_OPTIONS.length - 1
+              ? 0
+              : current.setupPickerSelectedIndex + 1,
+        }));
+        return;
+      }
+
+      if (key.return) {
+        const selectedItem = SETUP_LEVERAGE_OPTIONS[terminal.setupPickerSelectedIndex] ?? SETUP_LEVERAGE_OPTIONS[0];
+        if (selectedItem) {
+          setTerminal((current) => ({
+            ...current,
+            leverage: selectedItem.leverage,
+            setupPickerOpen: false,
+            setupPickerSelectedIndex: SETUP_LEVERAGE_OPTIONS.findIndex(
+              (option) => option.leverage === selectedItem.leverage,
+            ),
+          }));
+          setCommandInput('');
+        }
+        return;
+      }
+
+      return;
+    }
+
+    if (terminal.intervalPickerOpen) {
+      if (key.ctrl && input === 'c') {
+        futuresPriceWebsocketService.close();
+        process.exit(0);
+        return;
+      }
+
+      if (key.escape) {
+        setTerminal((current) => ({ ...current, intervalPickerOpen: false, intervalPickerSelectedIndex: 0 }));
+        return;
+      }
+
+      if (key.upArrow || key.downArrow) {
+        setTerminal((current) => ({
+          ...current,
+          intervalPickerSelectedIndex: key.upArrow
+            ? current.intervalPickerSelectedIndex <= 0
+              ? INTERVAL_ITEMS.length - 1
+              : current.intervalPickerSelectedIndex - 1
+            : current.intervalPickerSelectedIndex >= INTERVAL_ITEMS.length - 1
+              ? 0
+              : current.intervalPickerSelectedIndex + 1,
+        }));
+        return;
+      }
+
+      if (key.return) {
+        const selectedItem = INTERVAL_ITEMS[terminal.intervalPickerSelectedIndex] ?? INTERVAL_ITEMS[0];
+        if (selectedItem) {
+          setTerminal((current) => ({
+            ...current,
+            mode: selectedItem.interval as TerminalState['mode'],
+            intervalPickerOpen: false,
+            intervalPickerSelectedIndex: getIntervalIndex(selectedItem.interval),
+          }));
+          setCommandInput('');
+          setRefreshToken((current) => current + 1);
+        }
+        return;
+      }
+
+      return;
+    }
+
     if (terminal.watchPickerOpen) {
       if (key.ctrl && input === 'c') {
         futuresPriceWebsocketService.close();
@@ -362,7 +560,10 @@ function App() {
       }
 
       if (key.upArrow || key.downArrow) {
-        const watchPickerItems = filterWatchPickerItems(buildWatchPickerItems(liveState, terminal.watchlist), watchPickerQuery);
+        const watchPickerItems = filterWatchPickerItems(
+          buildWatchPickerItems(liveState, terminal.watchlist),
+          watchPickerQuery,
+        );
         if (watchPickerItems.length === 0) return;
         setTerminal((current) => ({
           ...current,
@@ -378,7 +579,10 @@ function App() {
       }
 
       if (key.return) {
-        const watchPickerItems = filterWatchPickerItems(buildWatchPickerItems(liveState, terminal.watchlist), watchPickerQuery);
+        const watchPickerItems = filterWatchPickerItems(
+          buildWatchPickerItems(liveState, terminal.watchlist),
+          watchPickerQuery,
+        );
         const selectedItem = watchPickerItems[terminal.watchPickerSelectedIndex] ?? watchPickerItems[0];
         if (selectedItem) {
           setTerminal((current) => ({
@@ -413,14 +617,12 @@ function App() {
     }
 
     if (key.escape && commandInput.length === 0) {
-      futuresPriceWebsocketService.close();
-      process.exit(0);
+      exitTerminalApp(0);
       return;
     }
 
     if (input === 'q' && commandInput.length === 0) {
-      futuresPriceWebsocketService.close();
-      process.exit(0);
+      exitTerminalApp(0);
       return;
     }
 
@@ -430,8 +632,7 @@ function App() {
       if (commandInput.trim().startsWith('/')) {
         if (commandSuggestions.length === 1) {
           commandToRun = commandSuggestions[0].command;
-        }
-        else if (commandSuggestions.length > 0) {
+        } else if (commandSuggestions.length > 0) {
           const selectedSuggestion = commandSuggestions[selectedSuggestionIndex] ?? commandSuggestions[0];
           if (selectedSuggestion && commandInput.trim() === '/') {
             commandToRun = selectedSuggestion.command;
@@ -457,7 +658,10 @@ function App() {
           ...current,
           ...result.state,
           levels: nextLevels,
+          setupMenuSelectedIndex: result.state.setupMenuSelectedIndex ?? current.setupMenuSelectedIndex,
+          setupPickerSelectedIndex: result.state.setupPickerSelectedIndex ?? current.setupPickerSelectedIndex,
           watchPickerSelectedIndex: result.state.watchPickerSelectedIndex ?? current.watchPickerSelectedIndex,
+          intervalPickerSelectedIndex: result.state.intervalPickerSelectedIndex ?? current.intervalPickerSelectedIndex,
           history: [
             ...current.history,
             {
@@ -475,6 +679,10 @@ function App() {
 
       if (!result.preserveInput) {
         setCommandInput('');
+      }
+
+      if (result.exit) {
+        exitTerminalApp(0);
       }
       return;
     }
@@ -548,6 +756,30 @@ function App() {
       setTerminal((current) => ({ ...current, watchPickerSelectedIndex: 0 }));
     }
   }, [terminal.watchPickerOpen]);
+
+  useEffect(() => {
+    if (terminal.intervalPickerOpen) {
+      setTerminal((current) => ({ ...current, intervalPickerSelectedIndex: getIntervalIndex(current.mode) }));
+    }
+  }, [terminal.intervalPickerOpen]);
+
+  useEffect(() => {
+    if (terminal.setupMenuOpen) {
+      setTerminal((current) => ({ ...current, setupMenuSelectedIndex: 0 }));
+    }
+  }, [terminal.setupMenuOpen]);
+
+  useEffect(() => {
+    if (terminal.setupPickerOpen) {
+      setTerminal((current) => ({
+        ...current,
+        setupPickerSelectedIndex: Math.max(
+          0,
+          SETUP_LEVERAGE_OPTIONS.findIndex((option) => option.leverage === current.leverage),
+        ),
+      }));
+    }
+  }, [terminal.setupPickerOpen]);
 
   useEffect(() => {
     if (typeof WebSocket === 'undefined') {
@@ -633,19 +865,39 @@ function App() {
       setLiveState((current) => ({ ...current, loading: true, error: null }));
 
       try {
-        const [exchangeInfoSummary, overview, symbolSnapshot, symbolDetail, bot, botLogs, openOrders, openPositions, realizedPnlHistory] =
-          await Promise.all([
-            futuresExchangeInfoController.getExchangeInfoSummary().then((res) => res.data).catch(() => null),
-            futuresMarketController.getMarketOverview().catch(() => null),
-            futuresMarketController.getMarketSymbolSnapshot(terminal.activeSymbol).catch(() => null),
-            futuresMarketController.getMarketSymbolDetail(terminal.activeSymbol, terminal.mode === 'scalp' ? '5m' : terminal.mode === 'swing' ? '1h' : '4h').catch(() => null),
-            futuresAutoBotService.getResolved(terminal.activeSymbol).catch(() => null),
-            futuresAutoBotService.getLogs(terminal.activeSymbol).catch(() => []),
-            futuresAutoTradeService.getOpenOrders(terminal.activeSymbol).catch(() => null),
-            futuresAutoTradeService.getOpenPositions(terminal.activeSymbol).catch(() => null),
-            futuresAutoTradeService.getRealizedPnlHistory(terminal.activeSymbol, 20).catch(() => null),
-          ]);
-        const interval = terminal.mode === 'scalp' ? '5m' : terminal.mode === 'swing' ? '1h' : '4h';
+        const [
+          accountResult,
+          exchangeInfoSummary,
+          overview,
+          symbolSnapshot,
+          symbolDetail,
+          bot,
+          botLogs,
+          openOrders,
+          openPositions,
+          realizedPnlHistory,
+        ] = await Promise.all([
+          futuresAutoTradeService
+            .getAccount()
+            .then((value) => ({ account: value, debug: value ? 'account_ok' : 'account_empty' }))
+            .catch((error) => ({
+              account: null,
+              debug: error instanceof Error ? error.message : 'account_request_failed',
+            })),
+          futuresExchangeInfoController
+            .getExchangeInfoSummary()
+            .then((res) => res.data)
+            .catch(() => null),
+          futuresMarketController.getMarketOverview().catch(() => null),
+          futuresMarketController.getMarketSymbolSnapshot(terminal.activeSymbol).catch(() => null),
+          futuresMarketController.getMarketSymbolDetail(terminal.activeSymbol, terminal.mode).catch(() => null),
+          futuresAutoBotService.getResolved(terminal.activeSymbol).catch(() => null),
+          futuresAutoBotService.getLogs(terminal.activeSymbol).catch(() => []),
+          futuresAutoTradeService.getOpenOrders(terminal.activeSymbol).catch(() => null),
+          futuresAutoTradeService.getOpenPositions(terminal.activeSymbol).catch(() => null),
+          futuresAutoTradeService.getRealizedPnlHistory(terminal.activeSymbol, 20).catch(() => null),
+        ]);
+        const interval = terminal.mode;
         const initialCandles = await loadCandlesWithHistory(terminal.activeSymbol, [interval, '15m', '5m', '1m'], 220);
 
         if (cancelled) {
@@ -658,7 +910,16 @@ function App() {
           overview !== null ||
           symbolSnapshot !== null ||
           symbolDetail !== null;
-          const liveDataRootCause = describeLiveDataRootCause({
+        const account = accountResult.account;
+        const profileDebug =
+          accountResult.debug !== 'account_ok'
+            ? accountResult.debug.length > 0
+              ? accountResult.debug
+              : 'account_request_failed'
+            : account && (!account.availableBalance || !account.totalWalletBalance)
+              ? 'empty_balance_fields'
+              : null;
+        const liveDataRootCause = describeLiveDataRootCause({
           initialCandles: initialCandles.length,
           currentPrice: liveState.currentPrice,
           exchangeInfoSummary,
@@ -668,11 +929,24 @@ function App() {
         });
         setLiveState((current) => ({
           ...current,
+          account: account
+            ? {
+                displayName: getBinanceProfileLabel(),
+                availableBalance: parseBalance(account.availableBalance ?? null),
+                totalMarginBalance: parseBalance(account.totalMarginBalance ?? null),
+                walletBalance: parseBalance(account.totalWalletBalance ?? null),
+                subtitle:
+                  account.availableBalance || account.totalWalletBalance
+                    ? 'Binance futures account'
+                    : 'Account data unavailable',
+              }
+            : null,
+          profileDebug,
           exchangeInfoSummary,
           overview,
           symbolSnapshot,
           symbolDetail,
-          initialCandles: initialCandles.length > 0 ? initialCandles : symbolDetail?.data.candles ?? [],
+          initialCandles: initialCandles.length > 0 ? initialCandles : (symbolDetail?.data.candles ?? []),
           bot,
           botLogs,
           openOrders,
@@ -684,11 +958,24 @@ function App() {
         }));
 
         const liveSnapshotState = {
+          account: account
+            ? {
+                displayName: getBinanceProfileLabel(),
+                availableBalance: parseBalance(account.availableBalance ?? null),
+                totalMarginBalance: parseBalance(account.totalMarginBalance ?? null),
+                walletBalance: parseBalance(account.totalWalletBalance ?? null),
+                subtitle:
+                  account.availableBalance || account.totalWalletBalance
+                    ? 'Binance futures account'
+                    : 'Account data unavailable',
+              }
+            : null,
+          profileDebug,
           exchangeInfoSummary,
           overview,
           symbolSnapshot,
           symbolDetail,
-          initialCandles: initialCandles.length > 0 ? initialCandles : symbolDetail?.data.candles ?? [],
+          initialCandles: initialCandles.length > 0 ? initialCandles : (symbolDetail?.data.candles ?? []),
           bot,
           botLogs,
           openOrders,
@@ -707,7 +994,9 @@ function App() {
         if (terminal.autoTrade && liveState.currentPrice !== null && snapshotForBot) {
           const currentBot = bot ?? (await futuresAutoBotService.getResolved(terminal.activeSymbol).catch(() => null));
           if (!currentBot) {
-            await futuresAutoBotService.start(buildAutoBotPlan(snapshotForBot, liveState.currentPrice));
+            await futuresAutoBotService.start(
+              buildAutoBotPlan(snapshotForBot, liveState.currentPrice, terminal.leverage),
+            );
           }
         } else if (!terminal.autoTrade) {
           await futuresAutoBotService.stop(terminal.activeSymbol).catch(() => undefined);
@@ -748,16 +1037,16 @@ function App() {
       .map((entry) => ({ command: entry.command, description: entry.description }));
   }, [commandInput]);
   const panelWidth = Math.max(40, terminalWidth - 2);
-  const watchPickerItems = useMemo(() => buildWatchPickerItems(liveState, terminal.watchlist), [liveState.overview, terminal.watchlist]);
+  const watchPickerItems = useMemo(
+    () => buildWatchPickerItems(liveState, terminal.watchlist),
+    [liveState.overview, terminal.watchlist],
+  );
   const filteredWatchPickerItems = useMemo(
     () => filterWatchPickerItems(watchPickerItems, watchPickerQuery),
-    [watchPickerItems, watchPickerQuery]
+    [watchPickerItems, watchPickerQuery],
   );
-  const credentialSource = getBinanceCredentialSource();
   const runtimeMode = getRuntimeMode();
   const profileLabel = getBinanceProfileLabel();
-  const apiKey = BINANCE_API_KEY();
-  const secretKey = BINANCE_SECRET_KEY();
 
   return (
     <Box flexDirection="column" padding={1} height={terminalHeight}>
@@ -773,26 +1062,26 @@ function App() {
           <Text color="#8be9fd" bold>
             {terminal.activeSymbol}
           </Text>{' '}
-          <Text color="#8b949e">profile: </Text>
-          <Text color={credentialSource === 'env' ? '#50fa7b' : credentialSource === 'json' ? '#8be9fd' : '#ff6b6b'}>
-            {credentialSource}
-          </Text>{' '}
           <Text color="#8b949e">runtime: </Text>
-          <Text color="#f1fa8c">{runtimeMode}</Text>{' '}
-          <Text color="#8b949e">interval: </Text>
-          <Text color="#f1fa8c">{terminal.mode === 'scalp' ? '5m' : terminal.mode === 'swing' ? '1h' : '4h'}</Text>{' '}
-          <Text color="#8b949e">mode: </Text>
-          <Text color="#8be9fd">{terminal.mode}</Text>{' '}
-          <Text color="#8b949e">auto: </Text>
+          <Text color="#f1fa8c">{runtimeMode}</Text> <Text color="#8b949e">interval: </Text>
+          <Text color="#f1fa8c">{terminal.mode}</Text> <Text color="#8b949e">auto: </Text>
           <Text color={terminal.autoTrade ? '#50fa7b' : '#ff6b6b'}>{terminal.autoTrade ? 'on' : 'off'}</Text>{' '}
           <Text color="#8b949e">view: </Text>
-          <Text color="#8be9fd">{terminal.view}</Text>{' '}
-          <Text color="#8b949e">uptime: </Text>
+          <Text color="#8be9fd">{terminal.view}</Text> <Text color="#8b949e">uptime: </Text>
           <Text color="#f1fa8c">{tick}s</Text>
         </Text>
         <Text>
           <Text color="#8b949e">market </Text>
-          <Text color={snapshot?.trend.direction === 'bullish' ? '#50fa7b' : snapshot?.trend.direction === 'bearish' ? '#ff6b6b' : '#c9d1d9'} bold>
+          <Text
+            color={
+              snapshot?.trend.direction === 'bullish'
+                ? '#50fa7b'
+                : snapshot?.trend.direction === 'bearish'
+                  ? '#ff6b6b'
+                  : '#c9d1d9'
+            }
+            bold
+          >
             {snapshot?.trend.label ?? 'loading'}
           </Text>{' '}
           <Text color="#8b949e">ws: </Text>
@@ -809,21 +1098,21 @@ function App() {
         {snapshot && !liveState.error ? (
           <>
             <Text>
-              <Text color="#8b949e">support: </Text>
-              <Text color="#50fa7b">{formatPrice(snapshot.supportResistance?.support ?? null)}</Text>{' '}
-              <Text color="#8b949e">resistance: </Text>
-              <Text color="#ff6b6b">{formatPrice(snapshot.supportResistance?.resistance ?? null)}</Text>{' '}
-              <Text color="#8b949e">price: </Text>
-              <Text color={liveState.currentPrice !== null ? '#8be9fd' : '#8b949e'}>{formatPrice(liveState.currentPrice)}</Text>
+              <Text color={liveState.currentPrice !== null ? '#8be9fd' : '#8b949e'}>
+                {formatPrice(liveState.currentPrice)}
+              </Text>
               <Text color="#8b949e"> ws: </Text>
-              <Text color="#8be9fd">{liveState.websocketLastEventAt ? formatDateAgo(liveState.websocketLastEventAt) : 'n/a'}</Text>
+              <Text color="#8be9fd">
+                {liveState.websocketLastEventAt ? formatDateAgo(liveState.websocketLastEventAt) : 'n/a'}
+              </Text>
             </Text>
             <Text>
               <Text color="#8b949e">setup: </Text>
-              <Text color={snapshot.setup.direction === 'long' ? '#50fa7b' : '#ff6b6b'}>{snapshot.setup.label}</Text>{' '}
+              <Text color={snapshot.setup.direction === 'long' ? '#50fa7b' : '#ff6b6b'}>
+                {snapshot.setup.label}
+              </Text>{' '}
               <Text color="#8b949e">grade: </Text>
-              <Text color="#f1fa8c">{snapshot.setup.grade}</Text>{' '}
-              <Text color="#8b949e">r/r: </Text>
+              <Text color="#f1fa8c">{snapshot.setup.grade}</Text> <Text color="#8b949e">r/r: </Text>
               <Text color={snapshot.setup.riskReward !== null ? '#8be9fd' : '#8b949e'}>
                 {snapshot.setup.riskReward !== null ? `1:${snapshot.setup.riskReward.toFixed(2)}` : 'n/a'}
               </Text>
@@ -836,12 +1125,24 @@ function App() {
               <Text color="#ff7b72" bold>
                 live api error
               </Text>
-              <Text>{' '}</Text>
+              <Text> </Text>
               <Text dimColor>{liveState.error}</Text>
             </Text>
           </Box>
         ) : null}
-        {liveState.error ? null : terminal.history.length > 1 ? <CommandHistory items={terminal.history} width={panelWidth} /> : null}
+        {liveState.error ? null : terminal.showHistoryPanel && terminal.history.length > 1 ? (
+          <CommandHistory items={terminal.history} width={panelWidth} />
+        ) : null}
+        {liveState.error ? null : terminal.showLogsPanel ? (
+          <BotLogs
+            items={(liveState.botLogs ?? []).map((log) => ({
+              input: '',
+              kind: log.level === 'error' ? 'error' : log.level === 'warn' ? 'system' : 'command',
+              message: log.message,
+            }))}
+            width={panelWidth}
+          />
+        ) : null}
         {liveState.error ? null : terminal.showHelp ? <HelpOverlay width={panelWidth} /> : null}
         {terminal.showProfilePanel ? (
           <Box borderStyle="round" borderColor="#8be9fd" paddingX={1} paddingY={0}>
@@ -851,31 +1152,58 @@ function App() {
               </Text>
               <Text>
                 <Text color="#8b949e">account: </Text>
-                <Text color="#f1fa8c">{profileLabel}</Text>
+                <Text color="#f1fa8c">{liveState.account?.displayName ?? profileLabel}</Text>
               </Text>
               <Text>
-                <Text color="#8b949e">source: </Text>
-                <Text color={credentialSource === 'env' ? '#50fa7b' : credentialSource === 'json' ? '#8be9fd' : '#ff6b6b'}>
-                  {credentialSource}
+                <Text color="#8b949e">available: </Text>
+                <Text color="#50fa7b">{formatBalance(liveState.account?.availableBalance ?? null)}</Text>
+              </Text>
+              <Text>
+                <Text color="#8b949e">wallet: </Text>
+                <Text color="#8be9fd">{formatBalance(liveState.account?.walletBalance ?? null)}</Text>
+              </Text>
+              <Text>
+                <Text color="#8b949e">margin: </Text>
+                <Text color="#f1fa8c">{formatBalance(liveState.account?.totalMarginBalance ?? null)}</Text>
+              </Text>
+              <Text>
+                <Text color="#8b949e">note: </Text>
+                <Text color="#c9d1d9">{liveState.account?.subtitle ?? 'Account data unavailable'}</Text>
+              </Text>
+              {liveState.profileDebug ? (
+                <Text>
+                  <Text color="#8b949e">debug: </Text>
+                  <Text color="#f1fa8c">{liveState.profileDebug}</Text>
                 </Text>
-              </Text>
-              <Text>
-                <Text color="#8b949e">api key: </Text>
-                <Text color="#c9d1d9">{apiKey || 'n/a'}</Text>
-              </Text>
-              <Text>
-                <Text color="#8b949e">secret: </Text>
-                <Text color="#c9d1d9">{formatSecret(secretKey)}</Text>
-              </Text>
+              ) : null}
             </Box>
           </Box>
+        ) : null}
+        {terminal.intervalPickerOpen ? (
+          <IntervalPicker
+            items={INTERVAL_ITEMS}
+            selectedIndex={Math.min(terminal.intervalPickerSelectedIndex, Math.max(0, INTERVAL_ITEMS.length - 1))}
+            width={panelWidth}
+          />
+        ) : null}
+        {terminal.setupMenuOpen ? (
+          <SetupMenu
+            selectedIndex={Math.min(terminal.setupMenuSelectedIndex, Math.max(0, SETUP_MENU_OPTIONS.length - 1))}
+            width={panelWidth}
+          />
+        ) : null}
+        {terminal.setupPickerOpen ? (
+          <SetupPicker
+            selectedIndex={Math.min(terminal.setupPickerSelectedIndex, Math.max(0, SETUP_LEVERAGE_OPTIONS.length - 1))}
+            width={panelWidth}
+          />
         ) : null}
         {terminal.watchPickerOpen ? (
           <WatchPicker
             items={filteredWatchPickerItems}
             selectedIndex={Math.min(
               terminal.watchPickerSelectedIndex,
-              Math.max(0, filteredWatchPickerItems.length - 1)
+              Math.max(0, filteredWatchPickerItems.length - 1),
             )}
             query={watchPickerQuery}
             width={panelWidth}
@@ -883,7 +1211,7 @@ function App() {
         ) : null}
       </Box>
 
-        {liveState.error ? null : snapshot ? (
+      {liveState.error ? null : snapshot ? (
         <TradingDashboard
           snapshot={snapshot}
           mode={terminal.mode}

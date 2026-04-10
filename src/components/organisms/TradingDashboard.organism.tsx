@@ -15,13 +15,19 @@ function price(value: number | null) {
 
   const absoluteValue = Math.abs(value);
   const decimals =
-    absoluteValue >= 1000 ? 2 :
-    absoluteValue >= 100 ? 3 :
-    absoluteValue >= 1 ? 4 :
-    absoluteValue >= 0.1 ? 5 :
-    absoluteValue >= 0.01 ? 6 :
-    absoluteValue >= 0.001 ? 8 :
-    10;
+    absoluteValue >= 1000
+      ? 2
+      : absoluteValue >= 100
+        ? 3
+        : absoluteValue >= 1
+          ? 4
+          : absoluteValue >= 0.1
+            ? 5
+            : absoluteValue >= 0.01
+              ? 6
+              : absoluteValue >= 0.001
+                ? 8
+                : 10;
 
   return value.toLocaleString('en-US', {
     minimumFractionDigits: 0,
@@ -49,6 +55,11 @@ function renderList(items: Array<string | null | undefined>, fallback: string) {
 
 function compact(value: string) {
   return value.length > 26 ? `${value.slice(0, 23)}...` : value;
+}
+
+function proximity(value: number | null, reference: number | null) {
+  if (value === null || reference === null || reference === 0) return null;
+  return (Math.abs(reference - value) / reference) * 100;
 }
 
 function line(label: string, value: React.ReactNode, labelWidth = 18) {
@@ -111,9 +122,12 @@ export function TradingDashboard({
   const setupColor = tone(snapshot.setup.direction);
   const botStateLabel = liveState.bot?.status ?? 'idle';
   const openOrderCount = liveState.openOrders ? liveState.openOrders[0].length + liveState.openOrders[1].length : 0;
-  const openPositionCount = liveState.openPositions?.filter((position) => Math.abs(Number(position.positionAmt ?? 0)) > 0).length ?? 0;
+  const openPositionCount =
+    liveState.openPositions?.filter((position) => Math.abs(Number(position.positionAmt ?? 0)) > 0).length ?? 0;
   const support = snapshot.supportResistance?.support ?? null;
   const resistance = snapshot.supportResistance?.resistance ?? null;
+  const strongSupport = snapshot.strongSupportResistance?.support ?? support;
+  const strongResistance = snapshot.strongSupportResistance?.resistance ?? resistance;
   const rangeValue = Number.isFinite(highPrice) && Number.isFinite(lowPrice) ? highPrice - lowPrice : null;
   const watchMode = view === 'overview' || view === 'market';
   const emaCandles = marketCandles;
@@ -129,9 +143,10 @@ export function TradingDashboard({
           {line(
             'pair',
             <>
-              <Badge label={snapshot.trend.label.toUpperCase()} color={trendColor} /> <Text dimColor>{snapshot.pair}</Text>
+              <Badge label={snapshot.trend.label.toUpperCase()} color={trendColor} />{' '}
+              <Text dimColor>{snapshot.pair}</Text>
             </>,
-            6
+            6,
           )}
           {line(
             'ohlc',
@@ -141,17 +156,21 @@ export function TradingDashboard({
               <Text color="#f8f8f2">{price(Number.isFinite(lowPrice) ? lowPrice : null)}</Text> c{' '}
               <Text color={numberTone(change)}>{price(lastPrice)}</Text>
             </>,
-            6
+            6,
           )}
           {line('bars', <Text color="#8be9fd">{marketCandles.length}</Text>, 6)}
           {line(
             'now',
             <>
-              cur <Text color={numberTone(liveState.currentPrice ?? lastPrice)}>{price(liveState.currentPrice ?? lastPrice)}</Text> chg{' '}
-              <Text color={numberTone(change)}>{pct(change)}</Text> rng <Text color="#f8f8f2">{price(rangeValue)}</Text> rsi{' '}
+              cur{' '}
+              <Text color={numberTone(liveState.currentPrice ?? lastPrice)}>
+                {price(liveState.currentPrice ?? lastPrice)}
+              </Text>{' '}
+              chg <Text color={numberTone(change)}>{pct(change)}</Text> rng{' '}
+              <Text color="#f8f8f2">{price(rangeValue)}</Text> rsi{' '}
               <Text color={snapshot.trend.rsi14 !== null ? '#f1fa8c' : '#8b949e'}>{price(snapshot.trend.rsi14)}</Text>
             </>,
-            6
+            6,
           )}
           {line(
             'ema',
@@ -159,15 +178,25 @@ export function TradingDashboard({
               20 <Text color="#8be9fd">{price(ema20)}</Text> 50 <Text color="#8be9fd">{price(ema50)}</Text> 100{' '}
               <Text color="#8be9fd">{price(ema100)}</Text> 200 <Text color="#8be9fd">{price(ema200)}</Text>
             </>,
-            6
+            6,
           )}
           {line(
-            'hl',
+            'levels',
             <>
-              atr <Text color="#f1fa8c">{price(snapshot.trend.atr14)}</Text> sup <Text color="#50fa7b">{price(support)}</Text> res{' '}
-              <Text color="#ff6b6b">{price(resistance)}</Text>
+              atr <Text color="#f1fa8c">{price(snapshot.trend.atr14)}</Text> sup{' '}
+              <Text color="#50fa7b">{price(support)}</Text> res <Text color="#ff6b6b">{price(resistance)}</Text>
             </>,
-            6
+            6,
+          )}
+          {line(
+            'strong',
+            <>
+              s-sup <Text color="#50fa7b">{price(strongSupport)}</Text> (
+              {proximity(liveState.currentPrice ?? lastPrice, strongSupport)?.toFixed(2) ?? 'n/a'}%) s-res{' '}
+              <Text color="#ff6b6b">{price(strongResistance)}</Text> (
+              {proximity(liveState.currentPrice ?? lastPrice, strongResistance)?.toFixed(2) ?? 'n/a'}%)
+            </>,
+            6,
           )}
         </Panel>
 
@@ -175,8 +204,16 @@ export function TradingDashboard({
           <Box marginTop={0}>
             <Panel title="Status" width={panelWidth}>
               {line('view', <Text color="#8be9fd">{`${mode.toUpperCase()} ${view.toUpperCase()}`}</Text>, 14)}
-              {line('auto-trade', <Text color={autoTrade ? '#50fa7b' : '#ff6b6b'}>{autoTrade ? 'on' : 'off'}</Text>, 14)}
-              {line('bot-state', <Text color={botStateLabel === 'idle' ? '#c9d1d9' : '#8be9fd'}>{botStateLabel}</Text>, 14)}
+              {line(
+                'auto-trade',
+                <Text color={autoTrade ? '#50fa7b' : '#ff6b6b'}>{autoTrade ? 'on' : 'off'}</Text>,
+                14,
+              )}
+              {line(
+                'bot-state',
+                <Text color={botStateLabel === 'idle' ? '#c9d1d9' : '#8be9fd'}>{botStateLabel}</Text>,
+                14,
+              )}
               {line('open-orders', <Text color="#f1fa8c">{openOrderCount}</Text>, 14)}
               {line('open-positions', <Text color="#f1fa8c">{openPositionCount}</Text>, 14)}
             </Panel>
@@ -188,17 +225,19 @@ export function TradingDashboard({
                 {line(
                   'bias',
                   <>
-                    <Badge label={snapshot.setup.label.toUpperCase()} color={setupColor} /> <Text dimColor>{snapshot.setup.grade}</Text>
+                    <Badge label={snapshot.setup.label.toUpperCase()} color={setupColor} />{' '}
+                    <Text dimColor>{snapshot.setup.grade}</Text>
                   </>,
-                  6
+                  6,
                 )}
                 {line(
                   'zone',
                   <>
-                    entry <Text color="#50fa7b">{price(snapshot.setup.entryMid)}</Text> stop <Text color="#ff6b6b">{price(snapshot.setup.stopLoss)}</Text> tp{' '}
+                    entry <Text color="#50fa7b">{price(snapshot.setup.entryMid)}</Text> stop{' '}
+                    <Text color="#ff6b6b">{price(snapshot.setup.stopLoss)}</Text> tp{' '}
                     <Text color="#f1fa8c">{price(snapshot.setup.takeProfit)}</Text>
                   </>,
-                  6
+                  6,
                 )}
                 {line(
                   'risk',
@@ -209,9 +248,13 @@ export function TradingDashboard({
                     </Text>{' '}
                     mode <Text color="#8be9fd">{snapshot.setup.pathMode}</Text>
                   </>,
-                  6
+                  6,
                 )}
-                {line('path', compact(snapshot.setup.path.map((step) => `${step.label}:${step.status}`).join(' / ')), 6)}
+                {line(
+                  'path',
+                  compact(snapshot.setup.path.map((step) => `${step.label}:${step.status}`).join(' / ')),
+                  6,
+                )}
               </Panel>
             </Box>
 
@@ -230,22 +273,44 @@ export function TradingDashboard({
               <Panel title="Core" width={panelWidth}>
                 {line(
                   'exch',
-                  liveState.exchangeInfoSummary
-                    ? <>
-                        sym <Text color="#8be9fd">{liveState.exchangeInfoSummary.tradingSymbolCount}</Text>/<Text color="#8be9fd">{liveState.exchangeInfoSummary.symbolCount}</Text> perp{' '}
-                        <Text color="#8be9fd">{liveState.exchangeInfoSummary.perpetualSymbolCount}</Text>
-                      </>
-                    : 'exchange unavailable'
+                  liveState.exchangeInfoSummary ? (
+                    <>
+                      sym <Text color="#8be9fd">{liveState.exchangeInfoSummary.tradingSymbolCount}</Text>/
+                      <Text color="#8be9fd">{liveState.exchangeInfoSummary.symbolCount}</Text> perp{' '}
+                      <Text color="#8be9fd">{liveState.exchangeInfoSummary.perpetualSymbolCount}</Text>
+                    </>
+                  ) : (
+                    'exchange unavailable'
+                  ),
                 )}
-                {line('watch', <Text color="#f8f8f2">{renderList(liveState.overview?.data.slice(0, 3).map((item) => item.symbol) ?? [], 'overview unavailable')}</Text>)}
+                {line(
+                  'watch',
+                  <Text color="#f8f8f2">
+                    {renderList(
+                      liveState.overview?.data.slice(0, 3).map((item) => item.symbol) ?? [],
+                      'overview unavailable',
+                    )}
+                  </Text>,
+                )}
+                {line(
+                  'levels',
+                  <>
+                    sup <Text color="#50fa7b">{price(support)}</Text> res{' '}
+                    <Text color="#ff6b6b">{price(resistance)}</Text> strong{' '}
+                    <Text color="#8be9fd">{price(strongSupport)}</Text> /{' '}
+                    <Text color="#8be9fd">{price(strongResistance)}</Text>
+                  </>,
+                )}
                 {line(
                   'candles',
-                  liveState.symbolDetail?.data.candles.length
-                    ? <>
-                        <Text color="#8be9fd">{liveState.symbolDetail.data.candles.length}</Text> bars current{' '}
-                        <Text color={numberTone(liveState.currentPrice)}>{price(liveState.currentPrice)}</Text>
-                      </>
-                    : 'candles unavailable'
+                  liveState.symbolDetail?.data.candles.length ? (
+                    <>
+                      <Text color="#8be9fd">{liveState.symbolDetail.data.candles.length}</Text> bars current{' '}
+                      <Text color={numberTone(liveState.currentPrice)}>{price(liveState.currentPrice)}</Text>
+                    </>
+                  ) : (
+                    'candles unavailable'
+                  ),
                 )}
               </Panel>
             </Box>
@@ -258,33 +323,42 @@ export function TradingDashboard({
                   'orders',
                   liveState.openOrders ? (
                     <>
-                      <Text color="#8be9fd">{liveState.openOrders[0].length}</Text> reg / <Text color="#8be9fd">{liveState.openOrders[1].length}</Text> algo
+                      <Text color="#8be9fd">{liveState.openOrders[0].length}</Text> reg /{' '}
+                      <Text color="#8be9fd">{liveState.openOrders[1].length}</Text> algo
                     </>
                   ) : (
                     'orders unavailable'
-                  )
+                  ),
                 )}
                 {line(
                   'pos',
                   liveState.openPositions?.length ? (
                     <>
-                      <Text color="#8be9fd">{liveState.openPositions.slice(0, 2).map((position) => `${position.symbol}:${position.positionSide}`).join(' • ')}</Text>
+                      <Text color="#8be9fd">
+                        {liveState.openPositions
+                          .slice(0, 2)
+                          .map((position) => `${position.symbol}:${position.positionSide}`)
+                          .join(' • ')}
+                      </Text>
                     </>
                   ) : (
                     'no positions'
-                  )
+                  ),
                 )}
                 {line(
                   'pnl',
                   liveState.realizedPnlHistory?.length ? (
                     <>
                       <Text color="#8be9fd">
-                        {liveState.realizedPnlHistory.slice(0, 2).map((item) => `${item.symbol}:${price(item.income)}`).join(' • ')}
+                        {liveState.realizedPnlHistory
+                          .slice(0, 2)
+                          .map((item) => `${item.symbol}:${price(item.income)}`)
+                          .join(' • ')}
                       </Text>
                     </>
                   ) : (
                     'no pnl history'
-                  )
+                  ),
                 )}
               </Panel>
             </Box>

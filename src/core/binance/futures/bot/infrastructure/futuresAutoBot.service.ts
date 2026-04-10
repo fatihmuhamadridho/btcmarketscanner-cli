@@ -1,41 +1,317 @@
 import { randomUUID } from 'crypto';
 import { BASE_API_BINANCE } from '@configs/base.config';
 import { formatDecimalString } from '@utils/format-number.util';
-import type { CoinValidationSnapshotSetupCandidate } from '@features/coin/interface/CoinValidationSnapshot.interface';
-import type {
-  FuturesAutoBotExecutionRecord,
-  FuturesAutoBotLogEntry,
-  FuturesAutoBotState,
-  StartFuturesAutoBotInput,
-} from '../domain/futuresAutoBot.model';
+import type { FuturesAutoBotExecutionRecord, FuturesAutoBotLogEntry, FuturesAutoBotState, StartFuturesAutoBotInput } from '../domain/futuresAutoBot.model';
 import { futuresAutoConsensusService } from './futuresAutoConsensus.service';
-import type { FuturesAutoBotOpenClawValidationResult } from './futuresAutoValidation.service';
-import { futuresAutoValidationService } from './futuresAutoValidation.service';
 import { futuresAutoTradeService } from './futuresAutoTrade.service';
 
 const inMemoryBots = new Map<string, FuturesAutoBotState>();
 const inMemoryLogs = new Map<string, FuturesAutoBotLogEntry[]>();
 const inFlightProgressChecks = new Set<string>();
-const OPENCLAW_PLAN_LOCK_TTL_MS = 45 * 60 * 1000;
-const OPENCLAW_REVALIDATION_COOLDOWN_MS = 10 * 60 * 1000;
-const USER_TIME_ZONE = 'Asia/Jakarta';
 
-function createBotId(symbol: string) { return `${symbol}-${randomUUID()}`; }
-function createLog(level: FuturesAutoBotLogEntry['level'], message: string): FuturesAutoBotLogEntry { return { id: randomUUID(), level, message, timestamp: new Date().toISOString() }; }
-async function storeLogEntry(symbol: string, log: FuturesAutoBotLogEntry, _persistToRedis = true) { void _persistToRedis; const currentLogs = inMemoryLogs.get(symbol) ?? []; inMemoryLogs.set(symbol, [...currentLogs, log].slice(-50)); }
-function parseNumber(value?: string | null) { if (value === undefined || value === null || value.trim().length === 0) return null; const parsed = Number(value); return Number.isFinite(parsed) ? parsed : null; }
-function formatLogPrice(value: number | null | undefined) { if (value === null || value === undefined || Number.isNaN(value)) return 'n/a'; const absoluteValue = Math.abs(value); const decimals = absoluteValue >= 1000 ? 2 : absoluteValue >= 100 ? 3 : absoluteValue >= 1 ? 4 : absoluteValue >= 0.1 ? 5 : absoluteValue >= 0.01 ? 7 : absoluteValue >= 0.001 ? 8 : 10; return formatDecimalString(value.toFixed(decimals)); }
-function formatUserDateTime(value?: string | null) { if (!value) return 'the TTL expires'; const parsed = new Date(value); if (Number.isNaN(parsed.getTime())) return value; return new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'medium', timeZone: USER_TIME_ZONE }).format(parsed); }
-function createWatchingStateFromConsensus(params: { current: FuturesAutoBotState; consensus: Awaited<ReturnType<typeof futuresAutoConsensusService.buildConsensus>>; currentPrice: number; }) { const { current, consensus, currentPrice } = params; const consensusSetup = consensus.consensusSetup ?? current.plan; return { ...current, execution: null, executionHistory: current.executionHistory ?? [], lastOpenClawValidationAt: null, lastOpenClawValidationFingerprint: null, openClawLockedPlan: null, plan: { ...current.plan, currentPrice, direction: consensusSetup.direction, entryMid: consensusSetup.entryMid, entryZone: { high: consensusSetup.entryZone.high, low: consensusSetup.entryZone.low }, notes: consensusSetup.reasons, riskReward: consensusSetup.riskReward, setupGrade: consensusSetup.grade, setupGradeRank: consensusSetup.gradeRank, setupLabel: consensusSetup.label, setupType: consensusSetup.pathMode === 'breakout' ? 'breakout_retest' : 'continuation', stopLoss: consensusSetup.stopLoss, takeProfits: consensusSetup.takeProfits }, planLockedAt: null, planLockExpiresAt: null, planSource: 'consensus' as const, status: 'watching' as const, updatedAt: new Date().toISOString() } satisfies FuturesAutoBotState; }
-function buildValidationSetupCandidateFromPlan(plan: FuturesAutoBotState['plan'], currentPrice: number, currentResistance: number | null, currentSupport: number | null): CoinValidationSnapshotSetupCandidate { const entryLow = plan.entryZone.low ?? plan.entryMid ?? currentPrice; const entryHigh = plan.entryZone.high ?? plan.entryMid ?? currentPrice; const plannedEntry = plan.entryMid ?? entryLow; const stopLoss = plan.stopLoss ?? currentPrice; const tp1 = plan.takeProfits[0]?.price ?? null; const tp2 = plan.takeProfits[1]?.price ?? null; const risk = plan.direction === 'short' ? stopLoss - plannedEntry : plannedEntry - stopLoss; const tp1Distance = tp1 === null ? null : plan.direction === 'short' ? plannedEntry - tp1 : tp1 - plannedEntry; const tp2Distance = tp2 === null ? null : plan.direction === 'short' ? plannedEntry - tp2 : tp2 - plannedEntry; return { direction: plan.direction, distance_to_resistance: currentResistance !== null ? Math.abs(currentResistance - currentPrice) : null, distance_to_support: currentSupport !== null ? Math.abs(currentPrice - currentSupport) : null, entry_zone: [entryLow, entryHigh], planned_entry: plannedEntry, risk_reward: { tp1: risk > 0 && tp1Distance !== null ? tp1Distance / risk : plan.riskReward, tp2: risk > 0 && tp2Distance !== null ? tp2Distance / risk : plan.riskReward }, setup_type: plan.setupType ?? 'continuation', sl_distance: Math.abs(plannedEntry - stopLoss), stop_loss: stopLoss, take_profit: { tp1, tp2 }, tp_distance: { tp1: tp1Distance !== null ? Math.abs(tp1Distance) : null, tp2: tp2Distance !== null ? Math.abs(tp2Distance) : null } }; }
-export class FuturesAutoBotService {
-  get(symbol: string) { return inMemoryBots.get(symbol) ?? null; }
-  hydrate(symbol: string, state: FuturesAutoBotState | null) { if (state === null) { inMemoryBots.delete(symbol); return null; } inMemoryBots.set(symbol, state); return state; }
-  async getResolved(symbol: string) { return inMemoryBots.get(symbol) ?? null; }
-  async getLogs(symbol: string) { return inMemoryLogs.get(symbol) ?? []; }
-  async recordProgress(symbol: string) { const current = inMemoryBots.get(symbol) ?? null; if (!current || current.status === 'stopped') return current; return current; }
-  async start(input: StartFuturesAutoBotInput) { const now = new Date().toISOString(); const state: FuturesAutoBotState = { botId: createBotId(input.symbol), createdAt: now, updatedAt: now, plan: input, executionHistory: [], openClawLockedPlan: null, lastOpenClawValidationAt: null, lastOpenClawValidationFingerprint: null, planSource: 'consensus', planLockedAt: null, planLockExpiresAt: null, status: 'watching' }; inMemoryBots.set(input.symbol, state); await storeLogEntry(input.symbol, createLog('success', `Start requested for ${input.symbol} on ${BASE_API_BINANCE() ?? 'Binance demo API'}.`), true); try { const consensus = await futuresAutoConsensusService.buildConsensus(input.symbol); const ticker = await futuresAutoTradeService.getCurrentPrice(input.symbol); const currentPrice = Number(ticker.price); if (!Number.isFinite(currentPrice)) return state; const account = await futuresAutoTradeService.getAccount().catch(() => null); const validation = await futuresAutoValidationService.validateSetup({ accountSize: account ? parseNumber(account.availableBalance ?? account.totalWalletBalance) ?? null : null, consensusSetup: consensus.consensusSetup, setupCandidateOverride: buildValidationSetupCandidateFromPlan(input, currentPrice, consensus.snapshots.find((snapshot) => snapshot.interval === '15m')?.supportResistance?.resistance ?? null, consensus.snapshots.find((snapshot) => snapshot.interval === '15m')?.supportResistance?.support ?? null), currentPrice, isPerpetual: true, leverage: input.leverage, symbol: input.symbol, timeframeSnapshots: consensus.snapshots }, { bypassCache: true }); if (validation.validation_result === 'accepted') { const lockedState: FuturesAutoBotState = { ...state, plan: { ...input, direction: validation.validated_setup.direction, entryMid: validation.validated_setup.planned_entry, entryZone: { low: validation.validated_setup.entry_zone[0], high: validation.validated_setup.entry_zone[1] }, riskReward: validation.validated_setup.risk_reward.tp2 ?? validation.validated_setup.risk_reward.tp1 ?? input.riskReward, setupLabel: `OpenClaw Suggested ${validation.validated_setup.direction === 'long' ? 'Long' : 'Short'} Setup`, setupType: validation.validated_setup.setup_type, stopLoss: validation.validated_setup.stop_loss, takeProfits: [{ label: 'TP1', price: validation.validated_setup.take_profit.tp1 }, { label: 'TP2', price: validation.validated_setup.take_profit.tp2 }, { label: 'TP3', price: null }] }, planSource: 'openclaw', openClawLockedPlan: null, planLockedAt: now, planLockExpiresAt: new Date(Date.now() + OPENCLAW_PLAN_LOCK_TTL_MS).toISOString(), updatedAt: now }; inMemoryBots.set(input.symbol, lockedState); return lockedState; } return state; } catch { return state; } }
-  async stop(symbol: string) { const current = inMemoryBots.get(symbol) ?? null; if (!current) return null; const nextState: FuturesAutoBotState = { ...current, status: 'stopped', updatedAt: new Date().toISOString() }; inMemoryBots.set(symbol, nextState); return nextState; }
-  async clear(symbol: string) { inMemoryBots.delete(symbol); inMemoryLogs.delete(symbol); inFlightProgressChecks.delete(symbol); }
+function createBotId(symbol: string) {
+  return `${symbol}-${randomUUID()}`;
 }
+
+function createLog(level: FuturesAutoBotLogEntry['level'], message: string): FuturesAutoBotLogEntry {
+  return { id: randomUUID(), level, message, timestamp: new Date().toISOString() };
+}
+
+async function storeLogEntry(symbol: string, log: FuturesAutoBotLogEntry) {
+  const currentLogs = inMemoryLogs.get(symbol) ?? [];
+  inMemoryLogs.set(symbol, [...currentLogs, log].slice(-50));
+}
+
+function parseNumber(value?: string | null) {
+  if (value === undefined || value === null || value.trim().length === 0) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatLogPrice(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return 'n/a';
+  const absoluteValue = Math.abs(value);
+  const decimals = absoluteValue >= 1000 ? 2 : absoluteValue >= 100 ? 3 : absoluteValue >= 1 ? 4 : absoluteValue >= 0.1 ? 5 : 7;
+  return formatDecimalString(value.toFixed(decimals));
+}
+
+function buildConsensusPlanFromSnapshot(plan: FuturesAutoBotState['plan'], snapshot: Awaited<ReturnType<typeof futuresAutoConsensusService.buildConsensus>>['consensusSetup']) {
+  if (!snapshot) return plan;
+  return {
+    ...plan,
+    currentPrice: plan.currentPrice,
+    direction: snapshot.direction,
+    entryMid: snapshot.entryMid,
+    entryZone: { low: snapshot.entryZone.low, high: snapshot.entryZone.high },
+    notes: snapshot.reasons,
+    riskReward: snapshot.riskReward,
+    setupGrade: snapshot.grade,
+    setupGradeRank: snapshot.gradeRank,
+    setupLabel: snapshot.label,
+    setupType: snapshot.pathMode === 'breakout' ? 'breakout_retest' : 'continuation',
+    stopLoss: snapshot.stopLoss,
+    takeProfits: snapshot.takeProfits,
+  };
+}
+
+function createWatchingStateFromConsensus(params: {
+  current: FuturesAutoBotState;
+  consensus: Awaited<ReturnType<typeof futuresAutoConsensusService.buildConsensus>>;
+  currentPrice: number;
+}) {
+  const { current, consensus, currentPrice } = params;
+  const consensusPlan = buildConsensusPlanFromSnapshot(current.plan, consensus.consensusSetup);
+  return {
+    ...current,
+    execution: null,
+    executionHistory: current.executionHistory ?? [],
+    openClawLockedPlan: null,
+    plan: {
+      ...consensusPlan,
+      currentPrice,
+    },
+    planLockedAt: null,
+    planLockExpiresAt: null,
+    planSource: 'consensus' as const,
+    status: 'watching' as const,
+    updatedAt: new Date().toISOString(),
+  } satisfies FuturesAutoBotState;
+}
+
+function buildPlanFromConsensus(plan: FuturesAutoBotState['plan'], consensusSetup: NonNullable<Awaited<ReturnType<typeof futuresAutoConsensusService.buildConsensus>>['consensusSetup']>) {
+  return buildConsensusPlanFromSnapshot(plan, consensusSetup);
+}
+
+export class FuturesAutoBotService {
+  get(symbol: string) {
+    return inMemoryBots.get(symbol) ?? null;
+  }
+
+  hydrate(symbol: string, state: FuturesAutoBotState | null) {
+    if (state === null) {
+      inMemoryBots.delete(symbol);
+      return null;
+    }
+
+    inMemoryBots.set(symbol, state);
+    return state;
+  }
+
+  async getResolved(symbol: string) {
+    return inMemoryBots.get(symbol) ?? null;
+  }
+
+  async getLogs(symbol: string) {
+    return inMemoryLogs.get(symbol) ?? [];
+  }
+
+  async recordProgress(symbol: string) {
+    const current = inMemoryBots.get(symbol) ?? null;
+    if (!current || current.status === 'stopped') return current;
+    if (inFlightProgressChecks.has(symbol)) return current;
+
+    inFlightProgressChecks.add(symbol);
+
+    try {
+      const consensus = await futuresAutoConsensusService.buildConsensus(symbol);
+      const ticker = await futuresAutoTradeService.getCurrentPrice(symbol);
+      const currentPrice = Number(ticker.price);
+      if (!Number.isFinite(currentPrice)) throw new Error('Unable to parse current market price.');
+
+      let nextState: FuturesAutoBotState = current;
+      const activePosition = (await futuresAutoTradeService.getOpenPositions(symbol)).find((position) => {
+        if (position.symbol !== symbol) return false;
+        const positionAmt = parseNumber(position.positionAmt) ?? 0;
+        return positionAmt !== 0;
+      });
+      const activePositionAmt = parseNumber(activePosition?.positionAmt) ?? 0;
+      const activePositionSide = activePosition
+        ? activePositionAmt > 0
+          ? 'LONG'
+          : activePositionAmt < 0
+            ? 'SHORT'
+            : 'BOTH'
+        : null;
+      const isPositionOpen = current.status === 'entry_placed' || Boolean(activePosition);
+      const hasConsensusSetup = Boolean(consensus.consensusSetup);
+
+      if (isPositionOpen && activePositionSide) {
+        const [regularOrders, algoOrders] = await futuresAutoTradeService.getOpenOrders(symbol);
+        const hasProtectionOrders = regularOrders.some((order) => order.type && (order.type.includes('STOP') || order.type.includes('TAKE_PROFIT')))
+          || algoOrders.some((order) => order.reduceOnly === true || order.closePosition === true || (order.type && (order.type.includes('STOP') || order.type.includes('TAKE_PROFIT'))));
+        const protectionQuantity = Math.abs(activePositionAmt);
+        const focusedState: FuturesAutoBotState = {
+          ...nextState,
+          execution: nextState.execution ?? current.execution ?? undefined,
+          status: 'entry_placed',
+        };
+        inMemoryBots.set(symbol, focusedState);
+
+        if (!hasProtectionOrders) {
+          const protectionOrders = await futuresAutoTradeService.placeProtectionOrders(focusedState.plan, protectionQuantity);
+          const protectionState: FuturesAutoBotState = {
+            ...focusedState,
+            execution: focusedState.execution
+              ? {
+                  ...focusedState.execution,
+                  algoOrderClientIds: protectionOrders.algoOrderClientIds,
+                  positionSide: activePositionSide === 'BOTH' ? null : activePositionSide,
+                  stopLossAlgoOrderId: protectionOrders.stopLossAlgoOrder?.algoId ?? null,
+                  takeProfitAlgoOrderIds: protectionOrders.takeProfitAlgoOrders.map((order) => order.algoId),
+                  quantity: protectionQuantity,
+                }
+              : null,
+          };
+
+          inMemoryBots.set(symbol, protectionState);
+          await storeLogEntry(symbol, createLog('success', `Existing position detected for ${symbol}. TP/SL were missing, so protection orders were attached.`));
+          return protectionState;
+        }
+
+        await storeLogEntry(symbol, createLog('info', `Existing position detected for ${symbol}. TP/SL already attached.`));
+        return focusedState;
+      }
+
+      if (!hasConsensusSetup) {
+        inMemoryBots.set(symbol, {
+          ...current,
+          status: 'watching',
+          updatedAt: new Date().toISOString(),
+        });
+        await storeLogEntry(symbol, createLog('warn', `Consensus unavailable for ${symbol}. Waiting for more market data.`));
+        return inMemoryBots.get(symbol) ?? current;
+      }
+
+      const activePlan = current.planSource === 'consensus' ? current.plan : buildPlanFromConsensus(current.plan, consensus.consensusSetup);
+      const entryLow = activePlan.entryZone.low ?? activePlan.entryMid ?? null;
+      const entryHigh = activePlan.entryZone.high ?? activePlan.entryMid ?? null;
+      const entryMin = entryLow !== null && entryHigh !== null ? Math.min(entryLow, entryHigh) : null;
+      const entryMax = entryLow !== null && entryHigh !== null ? Math.max(entryLow, entryHigh) : null;
+      const inEntryZone = entryMin !== null && entryMax !== null ? currentPrice >= entryMin && currentPrice <= entryMax : false;
+
+      const scannedState: FuturesAutoBotState = {
+        ...nextState,
+        lastScanPrice: currentPrice,
+        plan: activePlan,
+        planSource: 'consensus',
+        updatedAt: new Date().toISOString(),
+      };
+
+      if (!inEntryZone) {
+        inMemoryBots.set(symbol, scannedState);
+        return scannedState;
+      }
+
+      await storeLogEntry(symbol, createLog('success', `Entry trigger hit for ${symbol} at ${formatLogPrice(currentPrice)}. Placing limit entry.`));
+
+      const account = await futuresAutoTradeService.getAccount().catch(() => null);
+      const execution = (await futuresAutoTradeService.executeTrade(activePlan, currentPrice)) as {
+        entryOrder: { orderId: number; status?: string | null };
+        entryPrice: number | null;
+        entryFilled: boolean;
+        algoOrderClientIds: string[];
+        allocatedMargin: number;
+        positionSide: 'LONG' | 'SHORT' | null;
+        quantity: number;
+        stopLossAlgoOrder: { algoId: number } | null;
+        takeProfitAlgoOrders: Array<{ algoId: number }>;
+      };
+
+      const executionRecord: FuturesAutoBotExecutionRecord = {
+        allocatedMargin: execution.allocatedMargin,
+        algoOrderClientIds: execution.algoOrderClientIds,
+        entryOrderId: execution.entryOrder.orderId,
+        entryOrderStatus: execution.entryOrder.status ?? null,
+        entryPrice: execution.entryPrice ?? currentPrice,
+        executedAt: new Date().toISOString(),
+        positionSide: execution.positionSide,
+        stopLossAlgoOrderId: execution.stopLossAlgoOrder?.algoId ?? null,
+        takeProfitAlgoOrderIds: execution.takeProfitAlgoOrders.map((order) => order.algoId),
+        quantity: execution.quantity,
+      };
+
+      const executedState: FuturesAutoBotState = {
+        ...scannedState,
+        execution: executionRecord,
+        executionHistory: current.executionHistory ?? [],
+        plan: activePlan,
+        planLockedAt: new Date().toISOString(),
+        planLockExpiresAt: null,
+        planSource: 'consensus',
+        status: execution.entryFilled ? 'entry_placed' : 'entry_pending',
+      };
+
+      inMemoryBots.set(symbol, executedState);
+      await storeLogEntry(
+        symbol,
+        createLog(
+          'success',
+          execution.entryFilled
+            ? `Consensus accepted for ${symbol}. Entry order #${executionRecord.entryOrderId}, TP/SL orders attached.`
+            : `Consensus entry placed for ${symbol} at ${formatLogPrice(executionRecord.entryPrice)}. Waiting for fill.`,
+        ),
+      );
+
+      void account;
+      return executedState;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown auto bot execution error.';
+      const erroredState: FuturesAutoBotState = {
+        ...current,
+        status: 'error',
+        updatedAt: new Date().toISOString(),
+      };
+      inMemoryBots.set(symbol, erroredState);
+      await storeLogEntry(symbol, createLog('error', `Auto bot execution failed for ${symbol}: ${errorMessage}`));
+      return erroredState;
+    } finally {
+      inFlightProgressChecks.delete(symbol);
+    }
+  }
+
+  async start(input: StartFuturesAutoBotInput) {
+    const now = new Date().toISOString();
+    const executionEndpointLabel = BASE_API_BINANCE()?.includes('demo') ? 'Binance demo API' : 'Binance live API';
+    const state: FuturesAutoBotState = {
+      botId: createBotId(input.symbol),
+      createdAt: now,
+      updatedAt: now,
+      plan: input,
+      executionHistory: [],
+      openClawLockedPlan: null,
+      lastOpenClawValidationAt: null,
+      lastOpenClawValidationFingerprint: null,
+      planSource: 'consensus',
+      planLockedAt: null,
+      planLockExpiresAt: null,
+      status: 'watching',
+    };
+
+    inMemoryBots.set(input.symbol, state);
+    await storeLogEntry(
+      input.symbol,
+      createLog(
+        'success',
+        `Start requested for ${input.symbol} on ${executionEndpointLabel}. Armed for consensus entry with entry ${formatLogPrice(input.entryMid)}, leverage ${input.leverage}x.`,
+      ),
+    );
+
+    return state;
+  }
+
+  async stop(symbol: string) {
+    const current = inMemoryBots.get(symbol) ?? null;
+    if (!current) return null;
+    const nextState: FuturesAutoBotState = { ...current, status: 'stopped', updatedAt: new Date().toISOString() };
+    inMemoryBots.set(symbol, nextState);
+    return nextState;
+  }
+
+  async clear(symbol: string) {
+    inMemoryBots.delete(symbol);
+    inMemoryLogs.delete(symbol);
+    inFlightProgressChecks.delete(symbol);
+  }
+}
+
 export const futuresAutoBotService = new FuturesAutoBotService();

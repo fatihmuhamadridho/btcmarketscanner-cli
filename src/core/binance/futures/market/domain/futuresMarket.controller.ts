@@ -23,9 +23,19 @@ export class FuturesMarketController {
     this.getFuturesMarketOlderCandlesUseCase = new GetFuturesMarketOlderCandlesUseCase(repository);
   }
 
-  getMarketOverview() { return this.getFuturesMarketOverviewUseCase.execute(); }
-  getMarketSymbolDetail(symbol: string, interval = '1d') { return this.getFuturesMarketSymbolDetailUseCase.execute(symbol, interval); }
-  getMarketSymbolSnapshot(symbol: string) { return this.getFuturesMarketSymbolSnapshotUseCase.execute(symbol); }
-  getMarketInitialCandles(symbol: string, interval = '1d', limit = 500) { return this.getFuturesMarketInitialCandlesUseCase.execute(symbol, interval, limit); }
-  getOlderMarketCandles(symbol: string, beforeOpenTime: number, interval = '1d', limit = 48) { return this.getFuturesMarketOlderCandlesUseCase.execute(symbol, beforeOpenTime, interval, limit); }
+  getMarketOverview() {
+    return this.getFuturesMarketOverviewUseCase.execute();
+  }
+  getMarketSymbolDetail(symbol: string, interval = '1d') {
+    return this.getFuturesMarketSymbolDetailUseCase.execute(symbol, interval);
+  }
+  getMarketSymbolSnapshot(symbol: string) {
+    return this.getFuturesMarketSymbolSnapshotUseCase.execute(symbol);
+  }
+  getMarketInitialCandles(symbol: string, interval = '1d', limit = 500) {
+    return this.getFuturesMarketInitialCandlesUseCase.execute(symbol, interval, limit);
+  }
+  getOlderMarketCandles(symbol: string, beforeOpenTime: number, interval = '1d', limit = 48) {
+    return this.getFuturesMarketOlderCandlesUseCase.execute(symbol, beforeOpenTime, interval, limit);
+  }
 }

@@ -1,10 +1,10 @@
-const DEFAULT_DEMO_FUTURES_BASE_URL = 'https://demo-api.binance.com/api/v3';
+const DEFAULT_DEMO_FUTURES_BASE_URL = 'https://demo-fapi.binance.com/fapi/v1';
 const DEFAULT_LIVE_FUTURES_BASE_URL = 'https://fapi.binance.com/fapi/v1';
 
 function normalizeBaseUrl(value: string) {
   const trimmed = value.trim().replace(/\/+$/, '');
 
-  if (trimmed.includes('demo-api.binance.com/api/v3')) {
+  if (trimmed.includes('demo-api.binance.com/api/v3') || trimmed.includes('demo-fapi.binance.com')) {
     return DEFAULT_DEMO_FUTURES_BASE_URL;
   }
 

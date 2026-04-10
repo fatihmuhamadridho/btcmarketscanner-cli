@@ -1,4 +1,9 @@
-import type { FuturesExchangeInfoResponse, FuturesKlinesQuery, FuturesKlinesResponse, FuturesTicker24hrResponse } from './futuresMarket.interface';
+import type {
+  FuturesExchangeInfoResponse,
+  FuturesKlinesQuery,
+  FuturesKlinesResponse,
+  FuturesTicker24hrResponse,
+} from './futuresMarket.interface';
 
 export interface FuturesMarketRepository {
   getExchangeInfo(): Promise<FuturesExchangeInfoResponse>;

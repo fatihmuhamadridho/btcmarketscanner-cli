@@ -1,5 +1,6 @@
-export type TerminalMode = 'scalp' | 'swing' | 'position';
+export type TerminalMode = '1m' | '5m' | '15m' | '1h' | '4h';
 export type TerminalView = 'overview' | 'market' | 'bot' | 'orders' | 'history';
+export type TerminalSetupLeverageOption = 1 | 2 | 3 | 5 | 10 | 15 | 20 | 25 | 50 | 75 | 100 | 125 | 150;
 
 export type TerminalLevelState = {
   entry: number | null;
@@ -18,6 +19,15 @@ export type TerminalState = {
   autoTrade: boolean;
   levels: TerminalLevelState;
   mode: TerminalMode;
+  leverage: number;
+  setupMenuOpen: boolean;
+  setupMenuSelectedIndex: number;
+  setupPickerOpen: boolean;
+  setupPickerSelectedIndex: number;
+  showHistoryPanel: boolean;
+  showLogsPanel: boolean;
+  intervalPickerOpen: boolean;
+  intervalPickerSelectedIndex: number;
   showProfilePanel: boolean;
   watchPickerOpen: boolean;
   watchPickerSelectedIndex: number;
@@ -27,11 +37,11 @@ export type TerminalState = {
   history: TerminalHistoryItem[];
 };
 
-export type CommandResult =
-  | {
-      state: Partial<TerminalState>;
-      message: string;
-      kind?: TerminalHistoryItem['kind'];
-      preserveInput?: boolean;
-      refresh?: boolean;
-    };
+export type CommandResult = {
+  state: Partial<TerminalState>;
+  message: string;
+  kind?: TerminalHistoryItem['kind'];
+  preserveInput?: boolean;
+  refresh?: boolean;
+  exit?: boolean;
+};

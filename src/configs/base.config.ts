@@ -1,8 +1,4 @@
-import {
-  createDefaultConfig,
-  getBinanceWebsocketBaseUrl,
-  type AppConfigFile,
-} from '@configs/app-config';
+import { createDefaultConfig, getBinanceWebsocketBaseUrl, type AppConfigFile } from '@configs/app-config';
 
 let runtimeConfig: AppConfigFile = createDefaultConfig();
 

@@ -14,9 +14,14 @@ export class HashService {
     const salt = this.createSalt(DEFAULT_SALT_BYTES);
     const derivedKey = await this.deriveKey(value, salt, DEFAULT_ITERATIONS, DEFAULT_KEY_LENGTH);
 
-    return ['pbkdf2', DEFAULT_ALGORITHM, DEFAULT_ITERATIONS, DEFAULT_KEY_LENGTH, salt, this.toBase64Url(derivedKey)].join(
-      '$'
-    );
+    return [
+      'pbkdf2',
+      DEFAULT_ALGORITHM,
+      DEFAULT_ITERATIONS,
+      DEFAULT_KEY_LENGTH,
+      salt,
+      this.toBase64Url(derivedKey),
+    ].join('$');
   }
 
   static async compare(value: string, hashedValue: string): Promise<boolean> {
@@ -51,7 +56,7 @@ export class HashService {
     value: string,
     salt: string,
     iterations: number,
-    keyLength: number
+    keyLength: number,
   ): Promise<Uint8Array> {
     const crypto = this.getCrypto();
     const baseKey = await crypto.subtle.importKey('raw', this.encoder.encode(value), { name: 'PBKDF2' }, false, [
@@ -65,7 +70,7 @@ export class HashService {
         hash: DEFAULT_ALGORITHM,
       },
       baseKey,
-      keyLength * 8
+      keyLength * 8,
     );
 
     return new Uint8Array(bits);

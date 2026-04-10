@@ -17,10 +17,7 @@ export function CommandSuggestions({
 
   const visibleCount = 6;
   const maxStartIndex = Math.max(0, suggestions.length - visibleCount);
-  const startIndex = Math.min(
-    maxStartIndex,
-    Math.max(0, selectedIndex - Math.floor(visibleCount / 2)),
-  );
+  const startIndex = Math.min(maxStartIndex, Math.max(0, selectedIndex - Math.floor(visibleCount / 2)));
   const visibleSuggestions = suggestions.slice(startIndex, startIndex + visibleCount);
 
   return (

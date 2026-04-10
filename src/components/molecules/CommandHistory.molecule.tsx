@@ -9,13 +9,7 @@ function tone(kind: TerminalHistoryItem['kind']) {
   return '#e6edf3';
 }
 
-export function CommandHistory({
-  items,
-  width,
-}: {
-  items: TerminalHistoryItem[];
-  width?: number;
-}) {
+export function CommandHistory({ items, width }: { items: TerminalHistoryItem[]; width?: number }) {
   return (
     <Panel title="History" width={width}>
       <Box flexDirection="column">

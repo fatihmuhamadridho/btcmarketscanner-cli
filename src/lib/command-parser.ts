@@ -1,13 +1,36 @@
-import type { CommandResult, TerminalMode, TerminalState, TerminalView } from '@interfaces/terminal.interface';
-
-function parsePrice(raw: string) {
-  const value = Number(raw.replace(/,/g, ''));
-  return Number.isFinite(value) ? value : null;
-}
+import type {
+  CommandResult,
+  TerminalMode,
+  TerminalSetupLeverageOption,
+  TerminalState,
+} from '@interfaces/terminal.interface';
 
 function normalizeSymbol(raw: string) {
   return raw.trim().toUpperCase();
 }
+
+export const SETUP_LEVERAGE_OPTIONS: Array<{
+  leverage: TerminalSetupLeverageOption;
+  description: string;
+}> = [
+  { leverage: 1, description: 'lowest risk, slowest exposure' },
+  { leverage: 2, description: 'conservative position sizing' },
+  { leverage: 3, description: 'balanced default for testing' },
+  { leverage: 5, description: 'current default setup' },
+  { leverage: 10, description: 'higher conviction setup' },
+  { leverage: 15, description: 'aggressive but still common' },
+  { leverage: 20, description: 'high leverage setup' },
+  { leverage: 25, description: 'very aggressive leverage' },
+  { leverage: 50, description: 'extreme leverage for quick tests' },
+  { leverage: 75, description: 'very high leverage setup' },
+  { leverage: 100, description: 'maximum common retail leverage' },
+  { leverage: 125, description: 'exchange-style high leverage' },
+  { leverage: 150, description: 'maximum leverage preset' },
+];
+
+export const SETUP_MENU_OPTIONS = [
+  { key: 'leverage', label: 'Leverage', description: 'choose a leverage preset' },
+] as const;
 
 export function getDefaultTerminalState(): TerminalState {
   return {
@@ -22,7 +45,16 @@ export function getDefaultTerminalState(): TerminalState {
         tp3: null,
       },
     },
-    mode: 'swing',
+    mode: '1h',
+    leverage: 5,
+    setupMenuOpen: false,
+    setupMenuSelectedIndex: 0,
+    setupPickerOpen: false,
+    setupPickerSelectedIndex: 0,
+    showHistoryPanel: true,
+    showLogsPanel: false,
+    intervalPickerOpen: false,
+    intervalPickerSelectedIndex: 0,
     showProfilePanel: false,
     watchPickerOpen: false,
     watchPickerSelectedIndex: 0,
@@ -41,21 +73,32 @@ export function getDefaultTerminalState(): TerminalState {
 
 export function formatAvailableCommands() {
   return [
-    { command: '/profile', example: 'on|off|toggle', description: 'toggle the profile panel with account and credential details' },
-    { command: '/watch', example: 'BTCUSDT', description: 'open the live symbol picker or switch to a specific market symbol' },
-    { command: '/mode', example: 'scalp|swing|position', description: 'change how the scanner interprets market structure and risk' },
-    { command: '/entry', example: '65300', description: 'set the planned entry price for the current setup' },
-    { command: '/sl', example: '64000', description: 'set the stop loss level to control downside risk' },
-    { command: '/tp1', example: '67000', description: 'set the first take profit target for partial exits' },
-    { command: '/tp2', example: '68000', description: 'set the second take profit target for scaled exits' },
-    { command: '/tp3', example: '69000', description: 'set the third take profit target for the final exit' },
-    { command: '/auto', example: 'on|off|toggle', description: 'enable or disable automated trade execution logic' },
-    { command: '/view', example: 'overview|market|bot|orders|history', description: 'switch the terminal panel focus for futures data' },
-    { command: '/refresh', example: '', description: 'force a live data reload from the futures core' },
+    {
+      command: '/profile',
+      example: 'on|off|toggle',
+      description: 'toggle the profile panel with account and balance details',
+    },
+    {
+      command: '/watch',
+      example: 'BTCUSDT',
+      description: 'open the live symbol picker or switch to a specific market symbol',
+    },
+    { command: '/interval', example: '1m|5m|15m|1h|4h', description: 'change the active market interval preset' },
+    { command: '/history', example: 'on|off|toggle', description: 'show or hide the command history panel' },
+    { command: '/setup', example: '10', description: 'open the leverage picker or set leverage directly' },
+    { command: '/logs', example: '', description: 'toggle the bot logs panel for the active symbol' },
     { command: '/bot', example: 'start|stop|toggle', description: 'control the local futures bot state' },
+    { command: '/exit', example: '', description: 'exit the terminal app' },
     { command: '/help', example: '', description: 'show the available slash commands and their usage' },
-    { command: '/clear', example: '', description: 'clear the command history from the terminal view' },
   ];
+}
+
+function parseToggleState(arg: string, current: boolean) {
+  const next = arg.toLowerCase();
+  if (next === 'on') return true;
+  if (next === 'off') return false;
+  if (next === 'toggle' || next === '') return !current;
+  return null;
 }
 
 export function applyTerminalCommand(input: string, current: TerminalState): CommandResult {
@@ -89,9 +132,18 @@ export function applyTerminalCommand(input: string, current: TerminalState): Com
     };
   }
 
+  if (lowerCommand === 'exit') {
+    return {
+      state: { showHelp: false },
+      kind: 'system',
+      message: 'Exiting terminal.',
+      exit: true,
+    };
+  }
+
   if (lowerCommand === 'profile') {
-    const next = arg.toLowerCase();
-    if (!['on', 'off', 'toggle', ''].includes(next)) {
+    const next = parseToggleState(arg, current.showProfilePanel);
+    if (next === null) {
       return {
         state: {},
         kind: 'error',
@@ -100,42 +152,56 @@ export function applyTerminalCommand(input: string, current: TerminalState): Com
     }
 
     return {
-      state: {
-        showProfilePanel:
-          next === 'toggle'
-            ? !current.showProfilePanel
-            : next === 'off'
-              ? false
-              : true,
-      },
+      state: { showProfilePanel: next },
       kind: 'system',
-      message: `Profile panel ${next === 'off' || (next === 'toggle' && current.showProfilePanel) ? 'hidden' : 'shown'}.`,
+      message: `Profile panel ${next ? 'shown' : 'hidden'}.`,
     };
   }
 
-  if (lowerCommand === 'view') {
-    const nextView = arg.toLowerCase() as TerminalView;
-    if (!['overview', 'market', 'bot', 'orders', 'history'].includes(nextView)) {
+  if (lowerCommand === 'history') {
+    const next = parseToggleState(arg, current.showHistoryPanel);
+    if (next === null) {
       return {
         state: {},
         kind: 'error',
-        message: 'Usage: /view overview|market|bot|orders|history',
+        message: 'Usage: /history on|off|toggle',
       };
     }
 
     return {
-      state: { view: nextView, showHelp: false },
+      state: { showHistoryPanel: next },
       kind: 'system',
-      message: `View set to ${nextView}.`,
-      refresh: true,
+      message: `History panel ${next ? 'shown' : 'hidden'}.`,
     };
   }
 
-  if (lowerCommand === 'refresh') {
+  if (lowerCommand === 'interval') {
+    const next = arg.toLowerCase();
+    if (!next) {
+      return {
+        state: {
+          intervalPickerOpen: true,
+          intervalPickerSelectedIndex: 0,
+          showHelp: false,
+        },
+        kind: 'system',
+        message: 'Interval picker opened. Use arrows and Enter.',
+      };
+    }
+
+    const nextMode = next as TerminalMode;
+    if (!['1m', '5m', '15m', '1h', '4h'].includes(nextMode)) {
+      return {
+        state: {},
+        kind: 'error',
+        message: 'Usage: /interval 1m|5m|15m|1h|4h',
+      };
+    }
+
     return {
-      state: {},
+      state: { mode: nextMode, showHelp: false },
       kind: 'system',
-      message: 'Live data refresh requested.',
+      message: `Interval set to ${nextMode}.`,
       refresh: true,
     };
   }
@@ -161,11 +227,56 @@ export function applyTerminalCommand(input: string, current: TerminalState): Com
     };
   }
 
-  if (lowerCommand === 'clear') {
+  if (lowerCommand === 'logs') {
     return {
-      state: { history: [] },
+      state: { showLogsPanel: !current.showLogsPanel, showHelp: false },
       kind: 'system',
-      message: 'History cleared.',
+      message: `Logs panel ${current.showLogsPanel ? 'hidden' : 'shown'}.`,
+    };
+  }
+
+  if (lowerCommand === 'setup') {
+    const normalizedArg = arg.trim();
+    if (!normalizedArg) {
+      return {
+        state: {
+          setupMenuOpen: true,
+          setupMenuSelectedIndex: 0,
+          showHelp: false,
+        },
+        kind: 'system',
+        message: 'Setup menu opened. Use arrows and Enter.',
+      };
+    }
+
+    if (normalizedArg.toLowerCase() === 'leverage') {
+      return {
+        state: {
+          setupPickerOpen: true,
+          setupPickerSelectedIndex: SETUP_LEVERAGE_OPTIONS.findIndex((option) => option.leverage === current.leverage),
+          showHelp: false,
+        },
+        kind: 'system',
+        message: 'Leverage picker opened. Use arrows and Enter.',
+      };
+    }
+
+    const leverage = Number(normalizedArg);
+    if (!Number.isFinite(leverage) || leverage <= 0) {
+      return {
+        state: {},
+        kind: 'error',
+        message: 'Usage: /setup 10',
+      };
+    }
+
+    return {
+      state: {
+        leverage: Math.max(1, Math.trunc(leverage)),
+        showHelp: false,
+      },
+      kind: 'system',
+      message: `Leverage set to ${Math.max(1, Math.trunc(leverage))}x.`,
     };
   }
 
@@ -183,130 +294,16 @@ export function applyTerminalCommand(input: string, current: TerminalState): Com
       };
     }
 
-    const watchlist = current.watchlist.includes(symbol)
-      ? current.watchlist
-      : [symbol, ...current.watchlist].slice(0, 8);
-
     return {
       state: {
         activeSymbol: symbol,
-        watchlist,
+        watchlist: current.watchlist.includes(symbol) ? current.watchlist : [symbol, ...current.watchlist].slice(0, 8),
         watchPickerOpen: false,
         watchPickerSelectedIndex: 0,
         showHelp: false,
       },
       kind: 'system',
       message: `Watching ${symbol}.`,
-    };
-  }
-
-  if (lowerCommand === 'mode') {
-    const nextMode = arg.toLowerCase() as TerminalMode;
-    if (!['scalp', 'swing', 'position'].includes(nextMode)) {
-      return {
-        state: {},
-        kind: 'error',
-        message: 'Usage: /mode scalp|swing|position',
-      };
-    }
-
-    return {
-      state: { mode: nextMode, showHelp: false },
-      kind: 'system',
-      message: `Mode set to ${nextMode}.`,
-    };
-  }
-
-  if (lowerCommand === 'entry') {
-    const entry = parsePrice(arg);
-    if (entry === null) {
-      return { state: {}, kind: 'error', message: 'Usage: /entry 65300' };
-    }
-
-    return {
-      state: {
-        levels: {
-          ...current.levels,
-          entry,
-        },
-        showHelp: false,
-      },
-      kind: 'system',
-      message: `Entry set to ${entry.toLocaleString('en-US')}.`,
-    };
-  }
-
-  if (lowerCommand === 'sl' || lowerCommand === 'stop') {
-    const stopLoss = parsePrice(arg);
-    if (stopLoss === null) {
-      return { state: {}, kind: 'error', message: 'Usage: /sl 64000' };
-    }
-
-    return {
-      state: {
-        levels: {
-          ...current.levels,
-          stopLoss,
-        },
-        showHelp: false,
-      },
-      kind: 'system',
-      message: `Stop loss set to ${stopLoss.toLocaleString('en-US')}.`,
-    };
-  }
-
-  if (lowerCommand === 'tp1' || lowerCommand === 'tp2' || lowerCommand === 'tp3') {
-    const takeProfit = parsePrice(arg);
-    if (takeProfit === null) {
-      return { state: {}, kind: 'error', message: `Usage: /${lowerCommand} 67000` };
-    }
-
-    return {
-      state: {
-        levels: {
-          ...current.levels,
-          takeProfits: {
-            ...current.levels.takeProfits,
-            [lowerCommand]: takeProfit,
-          },
-        },
-        showHelp: false,
-      },
-      kind: 'system',
-      message: `${lowerCommand.toUpperCase()} set to ${takeProfit.toLocaleString('en-US')}.`,
-    };
-  }
-
-  if (lowerCommand === 'auto') {
-    const next = arg.toLowerCase();
-    if (!['on', 'off', 'toggle'].includes(next)) {
-      return {
-        state: {},
-        kind: 'error',
-        message: 'Usage: /auto on|off|toggle',
-      };
-    }
-
-    const autoTrade =
-      next === 'toggle' ? !current.autoTrade : next === 'on';
-
-    return {
-      state: { autoTrade, showHelp: false },
-      kind: 'system',
-      message: `Auto trade ${autoTrade ? 'enabled' : 'disabled'}.`,
-    };
-  }
-
-  if (lowerCommand === 'symbol') {
-    const symbol = normalizeSymbol(arg);
-    if (!symbol) {
-      return { state: {}, kind: 'error', message: 'Usage: /symbol BTCUSDT' };
-    }
-
-    return {
-      state: { activeSymbol: symbol, showHelp: false },
-      kind: 'system',
-      message: `Symbol changed to ${symbol}.`,
     };
   }
 
