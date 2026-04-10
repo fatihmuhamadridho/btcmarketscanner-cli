@@ -8,8 +8,9 @@
     "ai-agent": "./src/index.tsx"
   },
   "scripts": {
+    "build": "node ./scripts/build.mjs",
     "dev": "NODE_ENV=development node --watch --watch-preserve-output --import tsx --import ./src/env.ts src/index.tsx",
-    "start": "NODE_ENV=production node --import tsx --import ./src/env.ts src/index.tsx",
+    "start": "NODE_ENV=production node --import ./dist/env.js dist/index.js",
     "prepare": "husky",
     "deps:dev": "node ./scripts/switch-core-dependency.mjs workspace",
     "deps:prod": "node ./scripts/switch-core-dependency.mjs github",

@@ -14,10 +14,12 @@ export type WatchPickerItem = {
 export function WatchPicker({
   items,
   selectedIndex,
+  query,
   width,
 }: {
   items: WatchPickerItem[];
   selectedIndex: number;
+  query: string;
   width?: number;
 }) {
   if (items.length === 0) {
@@ -38,6 +40,13 @@ export function WatchPicker({
   return (
     <Panel title="Watch Picker" width={width}>
       <Box flexDirection="column">
+        {query.length > 0 ? (
+          <Box marginBottom={0}>
+            <Text color="#8b949e">
+              filter: <Text color="#8be9fd">{query}</Text>
+            </Text>
+          </Box>
+        ) : null}
         {visibleItems.map((item, visibleIndex) => {
           const index = startIndex + visibleIndex;
           const selected = index === selectedIndex;

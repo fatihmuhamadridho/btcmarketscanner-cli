@@ -12,7 +12,21 @@ function pct(value: number | null) {
 
 function price(value: number | null) {
   if (value === null || Number.isNaN(value)) return 'n/a';
-  return value.toLocaleString('en-US', { maximumFractionDigits: 2 });
+
+  const absoluteValue = Math.abs(value);
+  const decimals =
+    absoluteValue >= 1000 ? 2 :
+    absoluteValue >= 100 ? 3 :
+    absoluteValue >= 1 ? 4 :
+    absoluteValue >= 0.1 ? 5 :
+    absoluteValue >= 0.01 ? 6 :
+    absoluteValue >= 0.001 ? 8 :
+    10;
+
+  return value.toLocaleString('en-US', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: decimals,
+  });
 }
 
 function tone(direction: string) {

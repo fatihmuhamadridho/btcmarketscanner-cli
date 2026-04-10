@@ -1,5 +1,7 @@
 import { BASE_API_WEBSOCKET_BINANCE } from '@configs/base.config';
 
+const DEFAULT_FUTURES_WEBSOCKET_BASE_URL = 'wss://fstream.binance.com/ws';
+
 export type WebsocketEventHandler = (event: MessageEvent<string>) => void;
 
 export interface WebsocketServiceOptions {
@@ -21,7 +23,7 @@ export class WebsocketService {
       return path;
     }
 
-    const baseUrl = this.options.baseURL ?? BASE_API_WEBSOCKET_BINANCE ?? "";
+    const baseUrl = this.options.baseURL ?? BASE_API_WEBSOCKET_BINANCE ?? DEFAULT_FUTURES_WEBSOCKET_BASE_URL;
     const normalizedBaseUrl = baseUrl.endsWith("/")
       ? baseUrl.slice(0, -1)
       : baseUrl;
@@ -33,8 +35,8 @@ export class WebsocketService {
   }
 
   connect(path = "") {
-    if (globalThis.window === undefined) {
-      throw new Error("WebSocket is only available in the browser.");
+    if (typeof WebSocket === "undefined") {
+      throw new Error("WebSocket is not available in this runtime.");
     }
 
     if (this.socket && this.socket.readyState <= WebSocket.OPEN) {

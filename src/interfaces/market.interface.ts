@@ -21,6 +21,9 @@ export type LiveMarketState = {
   loading: boolean;
   error: string | null;
   lastUpdatedAt: string | null;
+  websocketConnected: boolean;
+  websocketError: string | null;
+  websocketLastEventAt: string | null;
 };
 
 export type MarketSnapshot = {

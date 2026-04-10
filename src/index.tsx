@@ -11,12 +11,14 @@ import { futuresAutoBotService } from '@core/binance/futures/bot/infrastructure/
 import { futuresAutoTradeService } from '@core/binance/futures/bot/infrastructure/futuresAutoTrade.service';
 import { FuturesExchangeInfoController } from '@core/binance/futures/exchange-info/domain/futuresExchangeInfo.controller';
 import { FuturesMarketController } from '@core/binance/futures/market/domain/futuresMarket.controller';
+import { WebsocketService } from '@services/websocket.service';
 import type { MarketMode, MarketSnapshot, LiveMarketState } from '@interfaces/market.interface';
 import type { TerminalState } from '@interfaces/terminal.interface';
 import { applyTerminalCommand, formatAvailableCommands, getDefaultTerminalState } from '@lib/command-parser';
 
 const futuresMarketController = new FuturesMarketController();
 const futuresExchangeInfoController = new FuturesExchangeInfoController();
+const futuresPriceWebsocketService = new WebsocketService();
 
 function buildMarketSnapshotFromLive(terminal: TerminalState, live: LiveMarketState): MarketSnapshot | null {
   if (live.initialCandles.length === 0) {
@@ -76,6 +78,35 @@ function formatCompactVolume(value: string | undefined) {
   return numeric.toFixed(0);
 }
 
+function formatPrice(value: number | null) {
+  if (value === null || Number.isNaN(value)) return 'n/a';
+
+  const absoluteValue = Math.abs(value);
+  const decimals =
+    absoluteValue >= 1000 ? 2 :
+    absoluteValue >= 100 ? 3 :
+    absoluteValue >= 1 ? 4 :
+    absoluteValue >= 0.1 ? 5 :
+    absoluteValue >= 0.01 ? 6 :
+    absoluteValue >= 0.001 ? 8 :
+    10;
+
+  return value.toLocaleString('en-US', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: decimals,
+  });
+}
+
+function formatDateAgo(value: string | null) {
+  if (!value) return 'n/a';
+
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) return 'n/a';
+
+  const elapsedSeconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  return `${elapsedSeconds}s ago`;
+}
+
 function buildWatchPickerItems(liveState: LiveMarketState, watchlist: string[]): WatchPickerItem[] {
   const marketItems = liveState.overview?.data ?? [];
   const marketMap = new Map(
@@ -102,6 +133,22 @@ function buildWatchPickerItems(liveState: LiveMarketState, watchlist: string[]):
     symbol: item.symbol,
     volumeLabel: formatCompactVolume(item.ticker.quoteVolume ?? item.ticker.volume),
   }));
+}
+
+function filterWatchPickerItems(items: WatchPickerItem[], query: string) {
+  const normalizedQuery = query.trim().toLowerCase();
+
+  if (normalizedQuery.length === 0) {
+    return items;
+  }
+
+  return items.filter((item) => {
+    return (
+      item.symbol.toLowerCase().includes(normalizedQuery) ||
+      item.pair.toLowerCase().includes(normalizedQuery) ||
+      item.displayName.toLowerCase().includes(normalizedQuery)
+    );
+  });
 }
 
 async function loadCandlesWithHistory(symbol: string, intervals: string[], targetCount = 220) {
@@ -175,6 +222,63 @@ function describeLiveDataRootCause(input: {
   return 'live market data is incomplete';
 }
 
+type BinanceAggTradeStreamEvent = {
+  e?: string;
+  s?: string;
+  p?: string;
+};
+
+async function normalizeWebsocketMessageData(data: unknown) {
+  if (typeof data === 'string') {
+    return data;
+  }
+
+  if (data instanceof ArrayBuffer) {
+    return new TextDecoder().decode(new Uint8Array(data));
+  }
+
+  if (ArrayBuffer.isView(data)) {
+    return new TextDecoder().decode(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+  }
+
+  if (typeof Blob !== 'undefined' && data instanceof Blob) {
+    return data.text();
+  }
+
+  if (data && typeof data === 'object' && 'toString' in data) {
+    const text = String(data);
+    return text === '[object Object]' ? null : text;
+  }
+
+  return null;
+}
+
+function parseLiveTradePrice(rawMessage: unknown, symbol: string) {
+  try {
+    const normalized = rawMessage;
+    if (typeof normalized !== 'string') {
+      return null;
+    }
+
+    const parsed = JSON.parse(normalized) as BinanceAggTradeStreamEvent;
+
+    if (parsed.e !== 'aggTrade' && parsed.e !== 'trade') {
+      return null;
+    }
+
+    if (parsed.s?.toUpperCase() !== symbol.toUpperCase()) {
+      return null;
+    }
+
+    const rawPrice = parsed.p;
+    const price = Number(rawPrice);
+
+    return Number.isFinite(price) ? price : null;
+  } catch {
+    return null;
+  }
+}
+
 function App() {
   const { exit } = useApp();
   const terminalHeight = process.stdout.rows ?? 43;
@@ -183,6 +287,7 @@ function App() {
   const [terminal, setTerminal] = useState<TerminalState>(() => getDefaultTerminalState());
   const [commandInput, setCommandInput] = useState('');
   const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(0);
+  const [watchPickerQuery, setWatchPickerQuery] = useState('');
   const [liveState, setLiveState] = useState<LiveMarketState>({
     exchangeInfoSummary: null,
     overview: null,
@@ -198,6 +303,9 @@ function App() {
     loading: true,
     error: null,
     lastUpdatedAt: null,
+    websocketConnected: false,
+    websocketError: null,
+    websocketLastEventAt: null,
   });
   const [refreshToken, setRefreshToken] = useState(0);
 
@@ -205,11 +313,12 @@ function App() {
     if (terminal.watchPickerOpen) {
       if (key.escape) {
         setTerminal((current) => ({ ...current, watchPickerOpen: false, watchPickerSelectedIndex: 0 }));
+        setWatchPickerQuery('');
         return;
       }
 
       if (key.upArrow || key.downArrow) {
-        const watchPickerItems = buildWatchPickerItems(liveState, terminal.watchlist);
+        const watchPickerItems = filterWatchPickerItems(buildWatchPickerItems(liveState, terminal.watchlist), watchPickerQuery);
         if (watchPickerItems.length === 0) return;
         setTerminal((current) => ({
           ...current,
@@ -225,7 +334,7 @@ function App() {
       }
 
       if (key.return) {
-        const watchPickerItems = buildWatchPickerItems(liveState, terminal.watchlist);
+        const watchPickerItems = filterWatchPickerItems(buildWatchPickerItems(liveState, terminal.watchlist), watchPickerQuery);
         const selectedItem = watchPickerItems[terminal.watchPickerSelectedIndex] ?? watchPickerItems[0];
         if (selectedItem) {
           setTerminal((current) => ({
@@ -238,8 +347,21 @@ function App() {
               : [selectedItem.symbol, ...current.watchlist].slice(0, 8),
           }));
           setCommandInput('');
+          setWatchPickerQuery('');
           setRefreshToken((current) => current + 1);
         }
+        return;
+      }
+
+      if (key.backspace || key.delete) {
+        setWatchPickerQuery((current) => current.slice(0, -1));
+        setTerminal((current) => ({ ...current, watchPickerSelectedIndex: 0 }));
+        return;
+      }
+
+      if (input.length === 1 && !key.ctrl && !key.meta) {
+        setWatchPickerQuery((current) => `${current}${input}`);
+        setTerminal((current) => ({ ...current, watchPickerSelectedIndex: 0 }));
         return;
       }
 
@@ -369,6 +491,86 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (terminal.watchPickerOpen) {
+      setWatchPickerQuery('');
+      setTerminal((current) => ({ ...current, watchPickerSelectedIndex: 0 }));
+    }
+  }, [terminal.watchPickerOpen]);
+
+  useEffect(() => {
+    if (typeof WebSocket === 'undefined') {
+      return undefined;
+    }
+
+    const streamPath = `${terminal.activeSymbol.toLowerCase()}@aggTrade`;
+
+    let socket: WebSocket | null = null;
+
+    try {
+      socket = futuresPriceWebsocketService.connect(streamPath);
+      setLiveState((current) => ({ ...current, websocketConnected: false, websocketError: null }));
+    } catch (error) {
+      setLiveState((current) => ({
+        ...current,
+        websocketConnected: false,
+        websocketError: error instanceof Error ? error.message : 'Unable to open websocket connection.',
+      }));
+      return undefined;
+    }
+
+    const handleOpen = () => {
+      setLiveState((current) => ({ ...current, websocketConnected: true, websocketError: null }));
+    };
+
+    const handleError = () => {
+      setLiveState((current) => ({
+        ...current,
+        websocketConnected: false,
+        websocketError: 'Websocket error.',
+      }));
+    };
+
+    const handleClose = () => {
+      setLiveState((current) => ({
+        ...current,
+        websocketConnected: false,
+        websocketError: current.websocketError ?? 'Websocket closed.',
+      }));
+    };
+
+    socket.onopen = handleOpen;
+    socket.onerror = handleError;
+    socket.onclose = handleClose;
+    socket.onmessage = (event) => {
+      void (async () => {
+        const normalized = await normalizeWebsocketMessageData(event.data);
+        const nextPrice = parseLiveTradePrice(normalized, terminal.activeSymbol);
+
+        if (nextPrice === null) {
+          return;
+        }
+
+        setLiveState((current) => {
+          return {
+            ...current,
+            currentPrice: nextPrice,
+            lastUpdatedAt: new Date().toISOString(),
+            websocketLastEventAt: new Date().toISOString(),
+          };
+        });
+      })();
+    };
+
+    return () => {
+      socket.onopen = null;
+      socket.onerror = null;
+      socket.onclose = null;
+      socket.onmessage = null;
+      futuresPriceWebsocketService.close();
+    };
+  }, [terminal.activeSymbol]);
+
+  useEffect(() => {
     setSelectedSuggestionIndex(0);
   }, [commandInput]);
 
@@ -379,7 +581,7 @@ function App() {
       setLiveState((current) => ({ ...current, loading: true, error: null }));
 
       try {
-        const [exchangeInfoSummary, overview, symbolSnapshot, symbolDetail, bot, botLogs, currentPrice, openOrders, openPositions, realizedPnlHistory] =
+        const [exchangeInfoSummary, overview, symbolSnapshot, symbolDetail, bot, botLogs, openOrders, openPositions, realizedPnlHistory] =
           await Promise.all([
             futuresExchangeInfoController.getExchangeInfoSummary().then((res) => res.data).catch(() => null),
             futuresMarketController.getMarketOverview().catch(() => null),
@@ -387,7 +589,6 @@ function App() {
             futuresMarketController.getMarketSymbolDetail(terminal.activeSymbol, terminal.mode === 'scalp' ? '5m' : terminal.mode === 'swing' ? '1h' : '4h').catch(() => null),
             futuresAutoBotService.getResolved(terminal.activeSymbol).catch(() => null),
             futuresAutoBotService.getLogs(terminal.activeSymbol).catch(() => []),
-            futuresAutoTradeService.getCurrentPrice(terminal.activeSymbol).then((item) => Number(item.price)).catch(() => null),
             futuresAutoTradeService.getOpenOrders(terminal.activeSymbol).catch(() => null),
             futuresAutoTradeService.getOpenPositions(terminal.activeSymbol).catch(() => null),
             futuresAutoTradeService.getRealizedPnlHistory(terminal.activeSymbol, 20).catch(() => null),
@@ -401,20 +602,20 @@ function App() {
 
         const hasRenderableData =
           initialCandles.length > 0 ||
-          currentPrice !== null ||
           exchangeInfoSummary !== null ||
           overview !== null ||
           symbolSnapshot !== null ||
           symbolDetail !== null;
-        const liveDataRootCause = describeLiveDataRootCause({
+          const liveDataRootCause = describeLiveDataRootCause({
           initialCandles: initialCandles.length,
-          currentPrice,
+          currentPrice: liveState.currentPrice,
           exchangeInfoSummary,
           overview,
           symbolSnapshot,
           symbolDetail,
         });
-        setLiveState({
+        setLiveState((current) => ({
+          ...current,
           exchangeInfoSummary,
           overview,
           symbolSnapshot,
@@ -425,11 +626,10 @@ function App() {
           openOrders,
           openPositions,
           realizedPnlHistory,
-          currentPrice,
           loading: false,
           error: hasRenderableData ? null : liveDataRootCause,
           lastUpdatedAt: new Date().toISOString(),
-        });
+        }));
 
         const liveSnapshotState = {
           exchangeInfoSummary,
@@ -442,17 +642,20 @@ function App() {
           openOrders,
           openPositions,
           realizedPnlHistory,
-          currentPrice,
+          currentPrice: liveState.currentPrice,
           loading: false,
           error: hasRenderableData ? null : liveDataRootCause,
           lastUpdatedAt: new Date().toISOString(),
+          websocketConnected: liveState.websocketConnected,
+          websocketError: liveState.websocketError,
+          websocketLastEventAt: liveState.websocketLastEventAt,
         };
         const snapshotForBot = symbolDetail?.data ? buildMarketSnapshotFromLive(terminal, liveSnapshotState) : null;
 
-        if (terminal.autoTrade && currentPrice !== null && snapshotForBot) {
+        if (terminal.autoTrade && liveState.currentPrice !== null && snapshotForBot) {
           const currentBot = bot ?? (await futuresAutoBotService.getResolved(terminal.activeSymbol).catch(() => null));
           if (!currentBot) {
-            await futuresAutoBotService.start(buildAutoBotPlan(snapshotForBot, currentPrice));
+            await futuresAutoBotService.start(buildAutoBotPlan(snapshotForBot, liveState.currentPrice));
           }
         } else if (!terminal.autoTrade) {
           await futuresAutoBotService.stop(terminal.activeSymbol).catch(() => undefined);
@@ -494,6 +697,10 @@ function App() {
   }, [commandInput]);
   const panelWidth = Math.max(40, terminalWidth - 2);
   const watchPickerItems = useMemo(() => buildWatchPickerItems(liveState, terminal.watchlist), [liveState.overview, terminal.watchlist]);
+  const filteredWatchPickerItems = useMemo(
+    () => filterWatchPickerItems(watchPickerItems, watchPickerQuery),
+    [watchPickerItems, watchPickerQuery]
+  );
 
   return (
     <Box flexDirection="column" padding={1} height={terminalHeight}>
@@ -525,6 +732,10 @@ function App() {
           <Text color={snapshot?.trend.direction === 'bullish' ? '#50fa7b' : snapshot?.trend.direction === 'bearish' ? '#ff6b6b' : '#c9d1d9'} bold>
             {snapshot?.trend.label ?? 'loading'}
           </Text>{' '}
+          <Text color="#8b949e">ws: </Text>
+          <Text color={liveState.websocketConnected ? '#50fa7b' : '#ff6b6b'}>
+            {liveState.websocketConnected ? 'open' : 'closed'}
+          </Text>{' '}
           <Text color="#8b949e">help: </Text>
           <Text color={terminal.showHelp ? '#8be9fd' : '#8b949e'}>{terminal.showHelp ? 'on' : 'off'}</Text>{' '}
           <Text color="#8b949e">live: </Text>
@@ -536,11 +747,13 @@ function App() {
           <>
             <Text>
               <Text color="#8b949e">support: </Text>
-              <Text color="#50fa7b">{snapshot.supportResistance?.support?.toLocaleString('en-US') ?? 'n/a'}</Text>{' '}
+              <Text color="#50fa7b">{formatPrice(snapshot.supportResistance?.support ?? null)}</Text>{' '}
               <Text color="#8b949e">resistance: </Text>
-              <Text color="#ff6b6b">{snapshot.supportResistance?.resistance?.toLocaleString('en-US') ?? 'n/a'}</Text>{' '}
+              <Text color="#ff6b6b">{formatPrice(snapshot.supportResistance?.resistance ?? null)}</Text>{' '}
               <Text color="#8b949e">price: </Text>
-              <Text color={liveState.currentPrice !== null ? '#8be9fd' : '#8b949e'}>{liveState.currentPrice?.toLocaleString('en-US') ?? 'n/a'}</Text>
+              <Text color={liveState.currentPrice !== null ? '#8be9fd' : '#8b949e'}>{formatPrice(liveState.currentPrice)}</Text>
+              <Text color="#8b949e"> ws: </Text>
+              <Text color="#8be9fd">{liveState.websocketLastEventAt ? formatDateAgo(liveState.websocketLastEventAt) : 'n/a'}</Text>
             </Text>
             <Text>
               <Text color="#8b949e">setup: </Text>
@@ -568,7 +781,15 @@ function App() {
         {liveState.error ? null : terminal.history.length > 1 ? <CommandHistory items={terminal.history} width={panelWidth} /> : null}
         {liveState.error ? null : terminal.showHelp ? <HelpOverlay width={panelWidth} /> : null}
         {terminal.watchPickerOpen ? (
-          <WatchPicker items={watchPickerItems} selectedIndex={terminal.watchPickerSelectedIndex} width={panelWidth} />
+          <WatchPicker
+            items={filteredWatchPickerItems}
+            selectedIndex={Math.min(
+              terminal.watchPickerSelectedIndex,
+              Math.max(0, filteredWatchPickerItems.length - 1)
+            )}
+            query={watchPickerQuery}
+            width={panelWidth}
+          />
         ) : null}
       </Box>
 
