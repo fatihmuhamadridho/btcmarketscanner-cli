@@ -16,6 +16,7 @@ import { futuresAutoConsensusService } from './futuresAutoConsensus.service';
 import type { FuturesAutoBotOpenClawValidationResult } from './futuresAutoValidation.service';
 import { futuresAutoValidationService } from './futuresAutoValidation.service';
 import { futuresAutoTradeService } from './futuresAutoTrade.service';
+import { telegramService } from '@services/telegram.service';
 
 const inMemoryBots = new Map<string, FuturesAutoBotState>();
 const inMemoryLogs = new Map<string, FuturesAutoBotLogEntry[]>();
@@ -229,6 +230,65 @@ function createWatchingStateFromConsensus(params: {
     status: 'watching' as const,
     updatedAt: new Date().toISOString(),
   } satisfies FuturesAutoBotState;
+}
+
+async function checkAndSendPriceNotifications(
+  state: FuturesAutoBotState,
+  currentPrice: number,
+): Promise<FuturesAutoBotState> {
+  if (!state.sentNotifications) {
+    state.sentNotifications = {};
+  }
+
+  const symbol = state.plan.symbol;
+  const plan = state.plan;
+  const notifications = state.sentNotifications;
+
+  console.log(`[DEBUG] Checking price notifications for ${symbol}. Current price: ${currentPrice}`);
+  console.log(`[DEBUG] Entry zone: ${plan.entryZone.low?.toFixed(4)} - ${plan.entryZone.high?.toFixed(4)}`);
+  console.log(`[DEBUG] Entry: ${plan.entryMid?.toFixed(4)}, SL: ${plan.stopLoss?.toFixed(4)}`);
+  console.log(`[DEBUG] TP1: ${plan.takeProfits[0]?.price?.toFixed(4)}, TP2: ${plan.takeProfits[1]?.price?.toFixed(4)}`);
+
+  // Check entry zone
+  const entryLow = plan.entryZone.low ?? null;
+  const entryHigh = plan.entryZone.high ?? null;
+  if (entryLow !== null && entryHigh !== null && !notifications.entryZone) {
+    const inZone = currentPrice >= Math.min(entryLow, entryHigh) && currentPrice <= Math.max(entryLow, entryHigh);
+    if (inZone) {
+      console.log(`[DEBUG] Entry zone touched, sending notification`);
+      await telegramService.sendPriceAlert(
+        symbol,
+        'entry_zone',
+        currentPrice,
+        `Entry zone: ${entryLow.toFixed(4)} - ${entryHigh.toFixed(4)}`,
+      );
+      notifications.entryZone = true;
+    }
+  }
+
+  // Check planned entry
+  if (plan.entryMid !== null && !notifications.plannedEntry && Math.abs(currentPrice - plan.entryMid) < 0.001) {
+    await telegramService.sendPriceAlert(symbol, 'planned_entry', currentPrice, `Entry: ${plan.entryMid.toFixed(4)}`);
+    notifications.plannedEntry = true;
+  }
+
+  // Check TP levels
+  for (let i = 0; i < plan.takeProfits.length; i++) {
+    const tp = plan.takeProfits[i];
+    const notifKey = `tp${i + 1}` as const;
+    if (tp?.price !== null && !notifications[notifKey] && Math.abs(currentPrice - tp.price) < 0.001) {
+      await telegramService.sendPriceAlert(symbol, notifKey, currentPrice, `TP${i + 1}: ${tp.price.toFixed(4)}`);
+      notifications[notifKey] = true;
+    }
+  }
+
+  // Check SL
+  if (plan.stopLoss !== null && !notifications.stopLoss && Math.abs(currentPrice - plan.stopLoss) < 0.001) {
+    await telegramService.sendPriceAlert(symbol, 'stop_loss', currentPrice, `SL: ${plan.stopLoss.toFixed(4)}`);
+    notifications.stopLoss = true;
+  }
+
+  return { ...state, sentNotifications: notifications };
 }
 
 function buildValidationSetupCandidateFromPlan(
@@ -716,11 +776,14 @@ export class FuturesAutoBotService {
 
       await storeLogEntry(symbol, createLog('info', scanMessage), shouldPersistLogs);
 
-      const scannedState: FuturesAutoBotState = {
+      let scannedState: FuturesAutoBotState = {
         ...nextState,
         lastScanPrice: currentPrice,
         updatedAt: new Date().toISOString(),
       };
+
+      // Check and send price notifications
+      scannedState = await checkAndSendPriceNotifications(scannedState, currentPrice);
 
       if (hasActivePosition && activePositionSide) {
         const [regularOrders, algoOrders] = await futuresAutoTradeService.getOpenOrders(symbol);
@@ -1509,6 +1572,7 @@ export class FuturesAutoBotService {
 
       // Check for existing open positions before doing OpenClaw validation
       const openPositions = await futuresAutoTradeService.getOpenPositions(finalInput.symbol);
+      console.log(`[DEBUG] getOpenPositions for ${finalInput.symbol}:`, JSON.stringify(openPositions));
       const activePosition = openPositions.find((p) => {
         if (p.symbol !== finalInput.symbol) return false;
         const amt = parseNumber(p.positionAmt) ?? 0;
@@ -1516,10 +1580,13 @@ export class FuturesAutoBotService {
       });
 
       if (activePosition) {
+        console.log(`[DEBUG] Active position found for ${finalInput.symbol}:`, JSON.stringify(activePosition));
         const activePositionAmt = parseNumber(activePosition.positionAmt) ?? 0;
         const activePositionSide = getPositionSideFromAmount(activePositionAmt, activePosition.positionSide);
         const protectionQuantity = Math.abs(activePositionAmt);
         const existingEntryPrice = parseNumber(activePosition.entryPrice) ?? finalInput.entryMid;
+
+        console.log(`[DEBUG] Position side: ${activePositionSide}, quantity: ${protectionQuantity}, entry price: ${existingEntryPrice}`);
 
         const focusedState: FuturesAutoBotState = {
           ...state,
@@ -1530,14 +1597,19 @@ export class FuturesAutoBotService {
 
         // Check if TP/SL are already in place
         const [regularOrders, algoOrders] = await futuresAutoTradeService.getOpenOrders(finalInput.symbol);
+        console.log(`[DEBUG] Regular orders: ${JSON.stringify(regularOrders)}`);
+        console.log(`[DEBUG] Algo orders: ${JSON.stringify(algoOrders)}`);
         const hasProtectionOrders = hasOpenProtectionOrder(regularOrders, algoOrders, activePositionSide);
+        console.log(`[DEBUG] hasOpenProtectionOrder result: ${hasProtectionOrders}`);
 
         if (!hasProtectionOrders) {
+          console.log(`[DEBUG] No protection orders found, will validate and place them`);
           // Validate existing position through OpenClaw to get appropriate TP/SL
           let openClawPlan = finalInput;
           try {
             const fifteenMinuteSnapshot = consensus.snapshots.find((snapshot) => snapshot.interval === '15m');
             const account = await futuresAutoTradeService.getAccount().catch(() => null);
+            console.log(`[DEBUG] Calling OpenClaw validation for existing position`);
             const validation = await futuresAutoValidationService.validateSetup(
               {
                 accountSize: account ? parseNumber(account.availableBalance ?? account.totalWalletBalance) ?? null : null,
@@ -1561,15 +1633,22 @@ export class FuturesAutoBotService {
               { bypassCache: true },
             );
 
+            console.log(`[DEBUG] OpenClaw validation result: ${JSON.stringify(validation)}`);
+
             // Use OpenClaw validated or suggested plan for protection orders
             // Mirror logic from runInitialOpenClawValidation
             if (validation.validation_result === 'accepted' && validation.validated_setup) {
+              console.log(`[DEBUG] Using validated setup from OpenClaw`);
               openClawPlan = buildPlanFromOpenClawSetup(finalInput, validation.validated_setup);
             } else if (validation.validation_result === 'rejected' && validation.suggested_setup) {
+              console.log(`[DEBUG] Using suggested setup from OpenClaw (rejected)`);
               openClawPlan = buildPlanFromOpenClawSetup(finalInput, validation.suggested_setup);
+            } else {
+              console.log(`[DEBUG] No validated or suggested setup, using input plan`);
             }
           } catch (validationError) {
             const errorMsg = validationError instanceof Error ? validationError.message : 'Unknown validation error';
+            console.log(`[DEBUG] OpenClaw validation error: ${errorMsg}`);
             await storeLogEntry(
               finalInput.symbol,
               createLog('warn', `OpenClaw validation for existing position skipped: ${errorMsg}. Using consensus plan for TP/SL.`),
@@ -1584,9 +1663,12 @@ export class FuturesAutoBotService {
             }),
             openClawPlan.takeProfits.length,
           );
+          console.log(`[DEBUG] Placing protection orders with takeProfitStartIndex: ${takeProfitStartIndex}`);
+          console.log(`[DEBUG] Protection plan TP1: ${openClawPlan.takeProfits[0]?.price}, TP2: ${openClawPlan.takeProfits[1]?.price}, SL: ${openClawPlan.stopLoss}`);
           const protectionOrders = await futuresAutoTradeService.placeProtectionOrders(openClawPlan, protectionQuantity, {
             takeProfitStartIndex,
           });
+          console.log(`[DEBUG] placeProtectionOrders result: ${JSON.stringify(protectionOrders)}`);
           const timestamp = new Date().toISOString();
           const protectionState: FuturesAutoBotState = {
             ...focusedState,

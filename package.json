@@ -10,13 +10,16 @@
   "scripts": {
     "build": "node ./scripts/build.mjs",
     "dev": "NODE_ENV=development node ./scripts/dev.mjs",
+    "start": "NODE_ENV=production node dist/index.js",
     "format": "prettier --write \"src/**/*.{ts,tsx,json,md,cjs,mjs}\" \"*.{json,md}\"",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,json,md,cjs,mjs}\" \"*.{json,md}\"",
-    "start": "NODE_ENV=production node dist/index.js",
     "prepare": "husky",
     "deps:dev": "node ./scripts/switch-core-dependency.mjs workspace",
     "deps:prod": "node ./scripts/switch-core-dependency.mjs github",
-    "deps:sync": "CI=1 pnpm install --force"
+    "deps:sync": "CI=1 pnpm install --force",
+    "bot": "node ./scripts/command-executor.mjs bot",
+    "watch": "node ./scripts/command-executor.mjs watch",
+    "revalidate": "node ./scripts/command-executor.mjs revalidate"
   },
   "keywords": [],
   "author": "",

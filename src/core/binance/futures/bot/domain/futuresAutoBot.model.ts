@@ -40,6 +40,14 @@ export type FuturesAutoBotState = {
   planLockedAt?: string | null;
   planLockExpiresAt?: string | null;
   status: CoinAutoBotStatus;
+  sentNotifications?: {
+    entryZone?: boolean;
+    plannedEntry?: boolean;
+    tp1?: boolean;
+    tp2?: boolean;
+    tp3?: boolean;
+    stopLoss?: boolean;
+  };
 };
 
 export type StartFuturesAutoBotInput = FuturesAutoBotPlan;

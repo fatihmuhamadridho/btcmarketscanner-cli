@@ -11,6 +11,17 @@ export type AppConfigFile = {
       };
     };
   };
+  notifications?: {
+    telegram?: {
+      enabled: boolean;
+      bot_token: string;
+      chat_id: string;
+    };
+  };
+  lastWatch?: {
+    symbol: string;
+    updatedAt: string;
+  };
 };
 
 export const APP_CONFIG_DIR = path.join(os.homedir(), '.btcmarketscanner');
@@ -39,7 +50,7 @@ export function normalizeConfig(input?: Partial<AppConfigFile> | null): AppConfi
   const apiKey = input?.auth?.profiles?.binance?.api_key ?? '';
   const secretKey = input?.auth?.profiles?.binance?.secret_key ?? '';
 
-  return {
+  const config: AppConfigFile = {
     auth: {
       profiles: {
         binance: {
@@ -49,6 +60,16 @@ export function normalizeConfig(input?: Partial<AppConfigFile> | null): AppConfi
       },
     },
   };
+
+  // Preserve notifications and lastWatch if present
+  if (input?.notifications) {
+    config.notifications = input.notifications;
+  }
+  if (input?.lastWatch) {
+    config.lastWatch = input.lastWatch;
+  }
+
+  return config;
 }
 
 export async function readAppConfig(): Promise<AppConfigFile | null> {
