@@ -1,4 +1,10 @@
-import type { TerminalAllocationUnit, CommandResult, TerminalMode, TerminalSetupLeverageOption, TerminalState } from '@interfaces/terminal.interface';
+import type {
+  TerminalAllocationUnit,
+  CommandResult,
+  TerminalMode,
+  TerminalSetupLeverageOption,
+  TerminalState,
+} from '@interfaces/terminal.interface';
 
 function normalizeSymbol(raw: string) {
   return raw.trim().toUpperCase();
@@ -55,6 +61,7 @@ export function getDefaultTerminalState(): TerminalState {
       },
     },
     mode: '1h',
+    botMode: 'scalping',
     leverage: 5,
     allocationUnit: 'percent',
     allocationValue: 10,
@@ -99,10 +106,26 @@ export function formatAvailableCommands() {
       description: 'open the live symbol picker or switch to a specific market symbol',
     },
     { command: '/interval', example: '1m|5m|15m|1h|4h', description: 'change the active market interval preset' },
+    {
+      command: '/botmode',
+      example: 'scalping|intraday',
+      description: 'switch bot mode: scalping (quick trades) or intraday (longer hold)',
+    },
     { command: '/history', example: 'on|off|toggle', description: 'show or hide the command history panel' },
     { command: '/setup', example: '', description: 'open leverage and entry allocation setup' },
     { command: '/logs', example: '', description: 'toggle the bot logs panel for the active symbol' },
     { command: '/bot', example: 'start|stop|toggle', description: 'control the local futures bot state' },
+    { command: '/set-sl', example: '40500', description: 'manually set stop loss price level' },
+    { command: '/set-tp1', example: '42500', description: 'manually set take profit 1 level' },
+    { command: '/set-tp2', example: '45000', description: 'manually set take profit 2 level' },
+    { command: '/set-tp3', example: '47000', description: 'manually set take profit 3 level' },
+    { command: '/entry', example: '', description: 'manually trigger entry order placement' },
+    { command: '/close', example: '', description: 'manually close active position' },
+    {
+      command: '/revalidate',
+      example: '',
+      description: 'manually request OpenClaw revalidation for the current setup',
+    },
     { command: '/exit', example: '', description: 'exit the terminal app' },
     { command: '/help', example: '', description: 'show the available slash commands and their usage' },
   ];
@@ -221,6 +244,33 @@ export function applyTerminalCommand(input: string, current: TerminalState): Com
     };
   }
 
+  if (lowerCommand === 'botmode') {
+    const next = arg.toLowerCase();
+    if (!next) {
+      return {
+        state: {},
+        kind: 'system',
+        message: `Current bot mode: ${current.botMode}. Usage: /botmode scalping|intraday`,
+      };
+    }
+
+    if (!['scalping', 'intraday'].includes(next)) {
+      return {
+        state: {},
+        kind: 'error',
+        message: 'Usage: /botmode scalping|intraday',
+      };
+    }
+
+    const nextBotMode = next as 'scalping' | 'intraday';
+    return {
+      state: { botMode: nextBotMode, showHelp: false },
+      kind: 'success',
+      message: `Bot mode switched to ${nextBotMode}. Will send this info to OpenClaw validation.`,
+      refresh: true,
+    };
+  }
+
   if (lowerCommand === 'bot') {
     const next = arg.toLowerCase();
     if (!['start', 'stop', 'toggle'].includes(next)) {
@@ -295,6 +345,161 @@ export function applyTerminalCommand(input: string, current: TerminalState): Com
       },
       kind: 'system',
       message: `Watching ${symbol}.`,
+    };
+  }
+
+  if (lowerCommand === 'set-sl') {
+    if (!arg) {
+      return {
+        state: {},
+        kind: 'error',
+        message: 'Usage: /set-sl <price>',
+      };
+    }
+
+    const price = parseFloat(arg);
+    if (!Number.isFinite(price) || price <= 0) {
+      return {
+        state: {},
+        kind: 'error',
+        message: 'Stop loss must be a valid positive number.',
+      };
+    }
+
+    return {
+      state: {
+        levels: { ...current.levels, stopLoss: price },
+        showHelp: false,
+      },
+      kind: 'success',
+      message: `Stop loss set to ${price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 8 })}.`,
+      refresh: true,
+    };
+  }
+
+  if (lowerCommand === 'set-tp1') {
+    if (!arg) {
+      return {
+        state: {},
+        kind: 'error',
+        message: 'Usage: /set-tp1 <price>',
+      };
+    }
+
+    const price = parseFloat(arg);
+    if (!Number.isFinite(price) || price <= 0) {
+      return {
+        state: {},
+        kind: 'error',
+        message: 'TP1 must be a valid positive number.',
+      };
+    }
+
+    return {
+      state: {
+        levels: {
+          ...current.levels,
+          takeProfits: { ...current.levels.takeProfits, tp1: price },
+        },
+        showHelp: false,
+      },
+      kind: 'success',
+      message: `TP1 set to ${price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 8 })}.`,
+      refresh: true,
+    };
+  }
+
+  if (lowerCommand === 'set-tp2') {
+    if (!arg) {
+      return {
+        state: {},
+        kind: 'error',
+        message: 'Usage: /set-tp2 <price>',
+      };
+    }
+
+    const price = parseFloat(arg);
+    if (!Number.isFinite(price) || price <= 0) {
+      return {
+        state: {},
+        kind: 'error',
+        message: 'TP2 must be a valid positive number.',
+      };
+    }
+
+    return {
+      state: {
+        levels: {
+          ...current.levels,
+          takeProfits: { ...current.levels.takeProfits, tp2: price },
+        },
+        showHelp: false,
+      },
+      kind: 'success',
+      message: `TP2 set to ${price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 8 })}.`,
+      refresh: true,
+    };
+  }
+
+  if (lowerCommand === 'set-tp3') {
+    if (!arg) {
+      return {
+        state: {},
+        kind: 'error',
+        message: 'Usage: /set-tp3 <price>',
+      };
+    }
+
+    const price = parseFloat(arg);
+    if (!Number.isFinite(price) || price <= 0) {
+      return {
+        state: {},
+        kind: 'error',
+        message: 'TP3 must be a valid positive number.',
+      };
+    }
+
+    return {
+      state: {
+        levels: {
+          ...current.levels,
+          takeProfits: { ...current.levels.takeProfits, tp3: price },
+        },
+        showHelp: false,
+      },
+      kind: 'success',
+      message: `TP3 set to ${price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 8 })}.`,
+      refresh: true,
+    };
+  }
+
+  if (lowerCommand === 'entry') {
+    return {
+      state: { showHelp: false },
+      kind: 'system',
+      message: 'Entry order placement triggered. Bot will place limit entry at planned price.',
+      botAction: 'place-entry',
+      refresh: true,
+    };
+  }
+
+  if (lowerCommand === 'close') {
+    return {
+      state: { showHelp: false },
+      kind: 'system',
+      message: 'Close position command triggered. Bot will close active position.',
+      botAction: 'close-position',
+      refresh: true,
+    };
+  }
+
+  if (lowerCommand === 'revalidate') {
+    return {
+      state: { showHelp: false },
+      kind: 'system',
+      message: 'Revalidation requested. Bot will re-evaluate current setup with OpenClaw.',
+      botAction: 'revalidate',
+      refresh: true,
     };
   }
 

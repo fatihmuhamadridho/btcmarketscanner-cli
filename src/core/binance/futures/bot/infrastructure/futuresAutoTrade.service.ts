@@ -1,9 +1,5 @@
 import { createHmac, randomUUID } from 'crypto';
-import {
-  BASE_API_BINANCE,
-  BINANCE_API_KEY,
-  BINANCE_SECRET_KEY,
-} from '@configs/base.config';
+import { BASE_API_BINANCE, BINANCE_API_KEY, BINANCE_SECRET_KEY } from '@configs/base.config';
 import { getBinanceFuturesBaseUrl } from '@configs/binance-futures-url';
 import { FuturesMarketController } from '../../market/domain/futuresMarket.controller';
 import type { FuturesAutoBotPlan } from '../domain/futuresAutoBot.model';
@@ -250,8 +246,7 @@ export class FuturesAutoTradeService {
       requestParams.set('timestamp', String(Date.now()));
       requestParams.set('signature', createHmac('sha256', secretKey).update(requestParams.toString()).digest('hex'));
       requestUrl.search = requestParams.toString();
-    }
-    else {
+    } else {
       requestUrl.search = searchParams.toString();
     }
 
@@ -548,8 +543,19 @@ export class FuturesAutoTradeService {
     const notional = allocatedMargin * Math.max(plan.leverage, 1);
     if (!Number.isFinite(currentPrice) || currentPrice <= 0)
       throw new Error(`Invalid current price for ${plan.symbol}.`);
-    const quantity = roundDownToStep(notional / currentPrice, stepSize);
+
+    // Cap notional value to prevent "Exceeded maximum allowable position" errors
+    // Binance typically allows ~500k USD notional per position at high leverage
+    const maxNotional = Math.min(500000, availableBalance * plan.leverage * 2); // Conservative limit
+    const cappedNotional = Math.min(notional, maxNotional);
+
+    const quantity = roundDownToStep(cappedNotional / currentPrice, stepSize);
     const entryPrice = getEntryLimitPrice(plan, currentPrice);
+
+    // Debug logging
+    console.log(
+      `[executeTrade] ${plan.symbol}: entryMid=${plan.entryMid}, entryZone=[${plan.entryZone.low}, ${plan.entryZone.high}], currentPrice=${currentPrice}, calculatedEntryPrice=${entryPrice}`,
+    );
     const normalizedEntryPrice = normalizePrice(entryPrice, tickSize, symbolInfo?.pricePrecision);
     const positionSide: FuturesPositionSide | null = account.dualSidePosition
       ? plan.direction === 'long'

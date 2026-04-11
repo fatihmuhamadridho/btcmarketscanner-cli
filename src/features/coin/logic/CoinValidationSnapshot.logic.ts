@@ -183,8 +183,7 @@ function buildSetupCandidate(params: {
           ? 'breakout_retest'
           : 'breakdown_retest'
         : 'continuation',
-    sl_distance:
-      isFiniteNumber(plannedEntry) && isFiniteNumber(stopLoss) ? Math.abs(plannedEntry - stopLoss) : null,
+    sl_distance: isFiniteNumber(plannedEntry) && isFiniteNumber(stopLoss) ? Math.abs(plannedEntry - stopLoss) : null,
     stop_loss: stopLoss,
     take_profit: { tp1, tp2 },
     tp_distance: {

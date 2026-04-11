@@ -3,15 +3,7 @@ import { Box, Text } from 'ink';
 import { Panel } from '@components/molecules/Panel.molecule';
 import type { TerminalAllocationUnit } from '@interfaces/terminal.interface';
 
-export function SetupInput({
-  unit,
-  value,
-  width,
-}: {
-  unit: TerminalAllocationUnit;
-  value: string;
-  width?: number;
-}) {
+export function SetupInput({ unit, value, width }: { unit: TerminalAllocationUnit; value: string; width?: number }) {
   return (
     <Panel title="Setup Value" width={width}>
       <Box flexDirection="column">

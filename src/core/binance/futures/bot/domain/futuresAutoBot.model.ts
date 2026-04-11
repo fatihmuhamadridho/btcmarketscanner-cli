@@ -6,6 +6,7 @@ export type FuturesAutoBotSetupType = 'breakout_retest' | 'breakdown_retest' | '
 export type FuturesAutoBotPlan = {
   allocationUnit: 'percent' | 'usdt';
   allocationValue: number;
+  botMode: 'scalping' | 'intraday';
   currentPrice: number | null;
   direction: FuturesAutoBotDirection;
   entryMid: number | null;

@@ -24,6 +24,8 @@ import { futuresAutoBotService } from '@core/binance/futures/bot/infrastructure/
 import { futuresAutoTradeService } from '@core/binance/futures/bot/infrastructure/futuresAutoTrade.service';
 import { FuturesExchangeInfoController } from '@core/binance/futures/exchange-info/domain/futuresExchangeInfo.controller';
 import { FuturesMarketController } from '@core/binance/futures/market/domain/futuresMarket.controller';
+import { loadCoinConfig, updateCoinConfigLeverage, updateCoinConfigAllocation } from '@services/coin-config.service';
+import { saveLastWatchedSymbol, loadLastWatchedSymbol } from '@services/watch-config.service';
 import { WebsocketService } from '@services/websocket.service';
 import { ensureOnboardedConfig } from '@services/onboarding.service';
 import type { MarketMode, MarketSnapshot, LiveMarketState } from '@interfaces/market.interface';
@@ -82,8 +84,7 @@ function buildMarketSnapshotFromLive(terminal: TerminalState, live: LiveMarketSt
     volume: candle.volume,
   }));
   const supportResistance = getSupportResistance(candles, Math.min(50, candles.length));
-  const strongSupportResistance =
-    getSupportResistance(candles, Math.min(150, candles.length)) ?? supportResistance;
+  const strongSupportResistance = getSupportResistance(candles, Math.min(150, candles.length)) ?? supportResistance;
   const trend = analyzeTrend(candles, supportResistance);
   const setupSide = trend.direction === 'bullish' ? 'long' : 'short';
   const setup = analyzeSetupSide(setupSide, candles, trend, supportResistance);
@@ -106,10 +107,12 @@ function buildAutoBotPlan(
   leverage: number,
   allocationUnit: 'percent' | 'usdt',
   allocationValue: number,
+  botMode: 'scalping' | 'intraday',
 ) {
   return {
     allocationUnit,
     allocationValue,
+    botMode,
     currentPrice,
     direction: snapshot.setup.direction,
     entryMid: snapshot.setup.entryMid,
@@ -400,6 +403,10 @@ function parseLiveTradePrice(rawMessage: unknown, symbol: string) {
     }
 
     if (parsed.s?.toUpperCase() !== symbol.toUpperCase()) {
+      // Only log symbol mismatches if they look relevant
+      if (parsed.s && !parsed.s.includes('_')) {
+        console.debug(`[price-parse] Symbol mismatch: expected ${symbol}, got ${parsed.s}`);
+      }
       return null;
     }
 
@@ -407,7 +414,8 @@ function parseLiveTradePrice(rawMessage: unknown, symbol: string) {
     const price = Number(rawPrice);
 
     return Number.isFinite(price) ? price : null;
-  } catch {
+  } catch (error) {
+    console.debug(`[price-parse] Error parsing price:`, error instanceof Error ? error.message : error);
     return null;
   }
 }
@@ -453,6 +461,59 @@ function App() {
       process.off('SIGINT', handleSigint);
     };
   }, []);
+
+  useEffect(() => {
+    // Load last watched symbol on app init
+    loadLastWatchedSymbol()
+      .then((symbol) => {
+        if (symbol) {
+          setTerminal((current) => ({
+            ...current,
+            activeSymbol: symbol,
+          }));
+        }
+      })
+      .catch((error) => {
+        console.error('[app] Failed to load last watched symbol:', error);
+      });
+  }, []);
+
+  useEffect(() => {
+    // Load coin config on app mount
+    loadCoinConfig('BTCUSDT')
+      .then((config) => {
+        if (config) {
+          setTerminal((current) => ({
+            ...current,
+            leverage: config.leverage,
+            allocationUnit: config.allocation.type,
+            allocationValue: config.allocation.value,
+          }));
+        }
+      })
+      .catch((error) => {
+        console.error('[app] Failed to load coin config on mount:', error);
+      });
+  }, []);
+
+  useEffect(() => {
+    // Load coin config when active symbol changes
+    if (terminal.activeSymbol === 'BTCUSDT') return; // Already loaded on mount
+    loadCoinConfig(terminal.activeSymbol)
+      .then((config) => {
+        if (config) {
+          setTerminal((current) => ({
+            ...current,
+            leverage: config.leverage,
+            allocationUnit: config.allocation.type,
+            allocationValue: config.allocation.value,
+          }));
+        }
+      })
+      .catch((error) => {
+        console.error(`[app] Failed to load coin config for ${terminal.activeSymbol}:`, error);
+      });
+  }, [terminal.activeSymbol]);
 
   useInput((input: string, key) => {
     if (terminal.setupMenuOpen) {
@@ -526,7 +587,9 @@ function App() {
 
       if (key.upArrow || key.downArrow) {
         const itemCount =
-          terminal.setupPickerMode === 'leverage' ? SETUP_LEVERAGE_OPTIONS.length : SETUP_ALLOCATION_UNIT_OPTIONS.length;
+          terminal.setupPickerMode === 'leverage'
+            ? SETUP_LEVERAGE_OPTIONS.length
+            : SETUP_ALLOCATION_UNIT_OPTIONS.length;
         setTerminal((current) => ({
           ...current,
           setupPickerSelectedIndex: key.upArrow
@@ -552,6 +615,10 @@ function App() {
               (option) => option.leverage === selectedItem.leverage,
             ),
           }));
+          // Save leverage to coin config
+          updateCoinConfigLeverage(terminal.activeSymbol, selectedItem.leverage).catch((error) => {
+            console.error(`[setup] Failed to save leverage for ${terminal.activeSymbol}:`, error);
+          });
         } else {
           const selectedItem =
             SETUP_ALLOCATION_UNIT_OPTIONS[terminal.setupPickerSelectedIndex] ?? SETUP_ALLOCATION_UNIT_OPTIONS[0];
@@ -597,15 +664,16 @@ function App() {
                 kind: 'error',
                 message: `Invalid ${current.setupInputUnit === 'usdt' ? 'amount' : 'percentage'} value.`,
               },
-            ],
+            ].slice(-100),
           }));
           return;
         }
 
+        const allocationValue = Number(parsed.toFixed(4));
         setTerminal((current) => ({
           ...current,
           allocationUnit: current.setupInputUnit,
-          allocationValue: Number(parsed.toFixed(4)),
+          allocationValue,
           setupInputOpen: false,
           setupInputValue: '',
           history: [
@@ -615,11 +683,18 @@ function App() {
               kind: 'system',
               message:
                 current.setupInputUnit === 'usdt'
-                  ? `Entry balance set to ${Number(parsed.toFixed(4))} USDT.`
-                  : `Entry allocation set to ${Number(parsed.toFixed(4))}%.`,
+                  ? `Entry balance set to ${allocationValue} USDT.`
+                  : `Entry allocation set to ${allocationValue}%.`,
             },
-          ],
+          ].slice(-100),
         }));
+        // Save allocation to coin config
+        updateCoinConfigAllocation(terminal.activeSymbol, {
+          type: terminal.setupInputUnit,
+          value: allocationValue,
+        }).catch((error) => {
+          console.error(`[setup] Failed to save allocation for ${terminal.activeSymbol}:`, error);
+        });
         return;
       }
 
@@ -728,6 +803,10 @@ function App() {
               ? current.watchlist
               : [selectedItem.symbol, ...current.watchlist].slice(0, 8),
           }));
+          // Save last watched symbol
+          saveLastWatchedSymbol(selectedItem.symbol).catch((error) => {
+            console.error('[watch] Failed to save last watched symbol:', error);
+          });
           setCommandInput('');
           setWatchPickerQuery('');
           setRefreshToken((current) => current + 1);
@@ -804,9 +883,16 @@ function App() {
               kind: result.kind ?? 'system',
               message: result.message,
             },
-          ],
+          ].slice(-100), // Keep only last 100 history items to prevent memory leak
         };
       });
+
+      // Save last watched symbol if watch command changed activeSymbol
+      if (result.state.activeSymbol && result.state.activeSymbol !== terminal.activeSymbol) {
+        saveLastWatchedSymbol(result.state.activeSymbol).catch((error) => {
+          console.error('[watch] Failed to save last watched symbol:', error);
+        });
+      }
 
       if (result.refresh) {
         setRefreshToken((current) => current + 1);
@@ -814,6 +900,22 @@ function App() {
 
       if (!result.preserveInput) {
         setCommandInput('');
+      }
+
+      if (result.botAction === 'place-entry') {
+        futuresAutoBotService.manualEntry(terminal.activeSymbol).catch((error) => {
+          console.error(`[terminal] Failed to place entry for ${terminal.activeSymbol}:`, error);
+        });
+      }
+
+      if (result.botAction === 'close-position') {
+        console.log(`[terminal] Close position requested for ${terminal.activeSymbol} - not yet implemented`);
+      }
+
+      if (result.botAction === 'revalidate') {
+        futuresAutoBotService.revalidate(terminal.activeSymbol).catch((error) => {
+          console.error(`[terminal] Failed to revalidate for ${terminal.activeSymbol}:`, error);
+        });
       }
 
       if (result.exit) {
@@ -910,8 +1012,14 @@ function App() {
         ...current,
         setupPickerSelectedIndex:
           current.setupPickerMode === 'leverage'
-            ? Math.max(0, SETUP_LEVERAGE_OPTIONS.findIndex((option) => option.leverage === current.leverage))
-            : Math.max(0, SETUP_ALLOCATION_UNIT_OPTIONS.findIndex((option) => option.unit === current.allocationUnit)),
+            ? Math.max(
+                0,
+                SETUP_LEVERAGE_OPTIONS.findIndex((option) => option.leverage === current.leverage),
+              )
+            : Math.max(
+                0,
+                SETUP_ALLOCATION_UNIT_OPTIONS.findIndex((option) => option.unit === current.allocationUnit),
+              ),
       }));
     }
   }, [terminal.setupPickerOpen, terminal.setupPickerMode]);
@@ -921,13 +1029,13 @@ function App() {
       return undefined;
     }
 
+    // Subscribe to aggregated trades for real-time price updates
     const streamPath = `${terminal.activeSymbol.toLowerCase()}@aggTrade`;
-
-    let socket: WebSocket | null = null;
+    let cancelled = false;
 
     try {
-      socket = futuresPriceWebsocketService.connect(streamPath);
-      setLiveState((current) => ({ ...current, websocketConnected: false, websocketError: null }));
+      futuresPriceWebsocketService.connect(streamPath);
+      setLiveState((current) => ({ ...current, websocketError: null }));
     } catch (error) {
       setLiveState((current) => ({
         ...current,
@@ -937,54 +1045,71 @@ function App() {
       return undefined;
     }
 
-    const handleOpen = () => {
-      setLiveState((current) => ({ ...current, websocketConnected: true, websocketError: null }));
-    };
+    // Use onMessage subscription instead of direct socket handler
+    // This ensures the handler persists across reconnections
+    let messageCount = 0;
+    let priceUpdateCount = 0;
 
-    const handleError = () => {
-      setLiveState((current) => ({
-        ...current,
-        websocketConnected: false,
-        websocketError: 'Websocket error.',
-      }));
-    };
+    const unsubscribe = futuresPriceWebsocketService.onMessage((event) => {
+      if (cancelled) return;
 
-    const handleClose = () => {
-      setLiveState((current) => ({
-        ...current,
-        websocketConnected: false,
-        websocketError: current.websocketError ?? 'Websocket closed.',
-      }));
-    };
-
-    socket.onopen = handleOpen;
-    socket.onerror = handleError;
-    socket.onclose = handleClose;
-    socket.onmessage = (event) => {
       void (async () => {
-        const normalized = await normalizeWebsocketMessageData(event.data);
-        const nextPrice = parseLiveTradePrice(normalized, terminal.activeSymbol);
+        try {
+          messageCount++;
+          const normalized = await normalizeWebsocketMessageData(event.data);
+          const nextPrice = parseLiveTradePrice(normalized, terminal.activeSymbol);
 
-        if (nextPrice === null) {
-          return;
+          if (nextPrice === null) {
+            // Log every 100 rejected messages to see if there's a pattern
+            if (messageCount % 100 === 0) {
+              console.warn(
+                `[websocket-handler] Received ${messageCount} messages but ${messageCount - priceUpdateCount} were rejected. Last message: ${typeof normalized === 'string' ? normalized.substring(0, 100) : 'non-string'}`,
+              );
+            }
+            return;
+          }
+
+          priceUpdateCount++;
+          setLiveState((current) => {
+            return {
+              ...current,
+              currentPrice: nextPrice,
+              lastUpdatedAt: new Date().toISOString(),
+              websocketLastEventAt: new Date().toISOString(),
+              websocketConnected: true,
+              websocketError: null,
+            };
+          });
+        } catch (error) {
+          console.error('[websocket-handler] Error processing message:', error);
         }
+      })();
+    });
 
-        setLiveState((current) => {
+    // Monitor socket state changes for connection status
+    const stateCheckInterval = setInterval(() => {
+      if (cancelled) return;
+
+      const currentSocket = futuresPriceWebsocketService.instance;
+      const isConnected = currentSocket && currentSocket.readyState === WebSocket.OPEN;
+
+      setLiveState((current) => {
+        if (current.websocketConnected !== isConnected) {
+          console.log(`[websocket-state] Connection state changed: ${isConnected ? 'OPEN' : 'CLOSED'}`);
           return {
             ...current,
-            currentPrice: nextPrice,
-            lastUpdatedAt: new Date().toISOString(),
-            websocketLastEventAt: new Date().toISOString(),
+            websocketConnected: isConnected,
+            websocketError: isConnected ? null : current.websocketError || 'Websocket disconnected',
           };
-        });
-      })();
-    };
+        }
+        return current;
+      });
+    }, 1000);
 
     return () => {
-      socket.onopen = null;
-      socket.onerror = null;
-      socket.onclose = null;
-      socket.onmessage = null;
+      cancelled = true;
+      clearInterval(stateCheckInterval);
+      unsubscribe();
       futuresPriceWebsocketService.close();
     };
   }, [terminal.activeSymbol]);
@@ -1082,36 +1207,36 @@ function App() {
           symbolSnapshot !== null ||
           symbolDetail !== null;
         const account = accountResult.account;
-          const profileDebug =
-            accountResult.debug !== 'account_ok'
-              ? accountResult.debug.length > 0
-                ? accountResult.debug
-                : 'account_request_failed'
-              : account && (!account.availableBalance || !account.totalWalletBalance)
-                ? 'empty_balance_fields'
-                : null;
-          const liveDataRootCause = describeLiveDataRootCause({
-            initialCandles: initialCandles.length,
-            currentPrice: liveState.currentPrice,
+        const profileDebug =
+          accountResult.debug !== 'account_ok'
+            ? accountResult.debug.length > 0
+              ? accountResult.debug
+              : 'account_request_failed'
+            : account && (!account.availableBalance || !account.totalWalletBalance)
+              ? 'empty_balance_fields'
+              : null;
+        const liveDataRootCause = describeLiveDataRootCause({
+          initialCandles: initialCandles.length,
+          currentPrice: liveState.currentPrice,
           exchangeInfoSummary,
           overview,
           symbolSnapshot,
           symbolDetail,
         });
-          setLiveState((current) => ({
-            ...current,
-            account: account
-              ? {
-                  displayName: getBinanceProfileLabel(),
-                  availableBalance: parseBalance(account.availableBalance ?? null),
-                  totalMarginBalance: parseBalance(account.totalMarginBalance ?? null),
-                  walletBalance: parseBalance(account.totalWalletBalance ?? null),
-                  subtitle:
-                    account.availableBalance || account.totalWalletBalance
-                      ? 'Binance futures account'
-                      : 'Account data unavailable',
-                }
-              : null,
+        setLiveState((current) => ({
+          ...current,
+          account: account
+            ? {
+                displayName: getBinanceProfileLabel(),
+                availableBalance: parseBalance(account.availableBalance ?? null),
+                totalMarginBalance: parseBalance(account.totalMarginBalance ?? null),
+                walletBalance: parseBalance(account.totalWalletBalance ?? null),
+                subtitle:
+                  account.availableBalance || account.totalWalletBalance
+                    ? 'Binance futures account'
+                    : 'Account data unavailable',
+              }
+            : null,
           profileDebug,
           exchangeInfoSummary,
           overview,
@@ -1126,7 +1251,7 @@ function App() {
           loading: false,
           error: hasRenderableData ? null : liveDataRootCause,
           lastUpdatedAt: new Date().toISOString(),
-          }));
+        }));
 
         const liveSnapshotState = {
           account: account
@@ -1172,6 +1297,7 @@ function App() {
                 terminal.leverage,
                 terminal.allocationUnit,
                 terminal.allocationValue,
+                terminal.botMode,
               ),
             );
           }
@@ -1193,8 +1319,17 @@ function App() {
     }
 
     loadLiveData();
+
+    // Periodically refresh market data every 5 seconds to keep candles updated
+    const interval = setInterval(() => {
+      if (!cancelled) {
+        loadLiveData();
+      }
+    }, 5000);
+
     return () => {
       cancelled = true;
+      clearInterval(interval);
     };
   }, [terminal.activeSymbol, terminal.mode, refreshToken]);
 
@@ -1426,6 +1561,7 @@ function App() {
           panelWidth={panelWidth}
           leverage={terminal.leverage}
           allocationLabel={formatAllocationLabel(terminal.allocationUnit, terminal.allocationValue)}
+          terminalLevels={terminal.levels}
         />
       ) : null}
 

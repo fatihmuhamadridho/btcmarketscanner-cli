@@ -3,6 +3,7 @@ export type TerminalView = 'overview' | 'market' | 'bot' | 'orders' | 'history';
 export type TerminalSetupLeverageOption = 1 | 2 | 3 | 5 | 10 | 15 | 20 | 25 | 50 | 75 | 100 | 125 | 150;
 export type TerminalAllocationUnit = 'percent' | 'usdt';
 export type TerminalSetupPickerMode = 'leverage' | 'allocationUnit';
+export type TerminalBotMode = 'scalping' | 'intraday';
 
 export type TerminalLevelState = {
   entry: number | null;
@@ -12,7 +13,7 @@ export type TerminalLevelState = {
 
 export type TerminalHistoryItem = {
   input: string;
-  kind: 'command' | 'system' | 'error';
+  kind: 'command' | 'system' | 'error' | 'success';
   message: string;
 };
 
@@ -21,6 +22,7 @@ export type TerminalState = {
   autoTrade: boolean;
   levels: TerminalLevelState;
   mode: TerminalMode;
+  botMode: TerminalBotMode;
   leverage: number;
   allocationUnit: TerminalAllocationUnit;
   allocationValue: number;
@@ -52,4 +54,5 @@ export type CommandResult = {
   preserveInput?: boolean;
   refresh?: boolean;
   exit?: boolean;
+  botAction?: 'place-entry' | 'close-position' | 'revalidate';
 };

@@ -41,7 +41,12 @@ function runBuild() {
 }
 
 function runApp() {
-  child = spawn(process.execPath, ['--import', './src/env.ts', ENTRYPOINT], {
+  child = spawn(process.execPath, [
+    '--max-old-space-size=4096',
+    '--import',
+    './src/env.ts',
+    ENTRYPOINT,
+  ], {
     cwd: ROOT_DIR,
     stdio: 'inherit',
     env: {

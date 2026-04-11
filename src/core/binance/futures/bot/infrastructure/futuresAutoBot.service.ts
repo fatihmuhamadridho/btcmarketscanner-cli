@@ -4,6 +4,7 @@ import os from 'os';
 import { join } from 'path';
 import { BASE_API_BINANCE } from '@configs/base.config';
 import { formatDecimalString } from '@utils/format-number.util';
+import { loadCoinConfig, saveCoinConfig, updateCoinConfigLastValidatedPlan } from '@services/coin-config.service';
 import type { CoinValidationSnapshotSetupCandidate } from '@features/coin/interface/CoinValidationSnapshot.interface';
 import type {
   FuturesAutoBotExecutionRecord,
@@ -149,10 +150,24 @@ function buildPlanFromOpenClawSetup(
     { label: 'TP3', price: null },
   ];
 
-  return {
+  // Verify setup has required fields
+  if (!setup || !setup.entry_zone || !setup.planned_entry) {
+    console.log(`[buildPlan-WARN] ${plan.symbol}: Invalid setup structure!`, setup);
+    return plan; // Return original plan if setup is invalid
+  }
+
+  // CRITICAL: Always set entryMid explicitly from setup.planned_entry
+  // This MUST NOT be null or the fallback will use entry zone values!
+  const entryMidValue = Number(setup.planned_entry);
+  if (!Number.isFinite(entryMidValue)) {
+    console.log(`[buildPlan-ERROR] ${plan.symbol}: planned_entry is not a valid number!`, setup.planned_entry);
+    return plan;
+  }
+
+  const builtPlan = {
     ...plan,
     direction: setup.direction,
-    entryMid: setup.planned_entry,
+    entryMid: entryMidValue, // MUST be set from setup.planned_entry
     entryZone: {
       high: Math.max(setup.entry_zone[0], setup.entry_zone[1]),
       low: Math.min(setup.entry_zone[0], setup.entry_zone[1]),
@@ -163,6 +178,12 @@ function buildPlanFromOpenClawSetup(
     stopLoss: setup.stop_loss,
     takeProfits,
   };
+
+  console.log(
+    `[buildPlan-openclaw] ${plan.symbol}: BUILT setup.entry_zone=${JSON.stringify(setup.entry_zone)}, setup.planned_entry=${setup.planned_entry}, setup.stop_loss=${setup.stop_loss} -> entryMid=${builtPlan.entryMid}, entryZone=[${builtPlan.entryZone.low}, ${builtPlan.entryZone.high}]`,
+  );
+
+  return builtPlan;
 }
 
 function getLockedOpenClawPlan(current: FuturesAutoBotState, suggestedPlan: FuturesAutoBotState['plan'] | null) {
@@ -265,6 +286,7 @@ async function runInitialOpenClawValidation(params: {
   const validation = await futuresAutoValidationService.validateSetup(
     {
       accountSize: currentAccountSize,
+      botMode: baseState.plan.botMode,
       consensusSetup: consensus.consensusSetup,
       setupCandidateOverride: buildValidationSetupCandidateFromPlan(
         baseState.plan,
@@ -296,6 +318,22 @@ async function runInitialOpenClawValidation(params: {
     };
 
     inMemoryBots.set(currentSymbol, acceptedState);
+
+    // Save validated plan to coin config
+    const validatedSetup = validation.validated_setup;
+    await updateCoinConfigLastValidatedPlan(currentSymbol, {
+      direction: validatedSetup.direction,
+      entry_zone: validatedSetup.entry_zone,
+      planned_entry: validatedSetup.planned_entry,
+      risk_reward: validatedSetup.risk_reward,
+      setup_type: validatedSetup.setup_type,
+      stop_loss: validatedSetup.stop_loss,
+      take_profit: validatedSetup.take_profit,
+      confidence: validation.confidence,
+    }).catch((error) => {
+      console.error(`[coin-config] Failed to save validated plan for ${currentSymbol}:`, error);
+    });
+
     await storeLogEntry(
       currentSymbol,
       createLog(
@@ -308,14 +346,97 @@ async function runInitialOpenClawValidation(params: {
     return acceptedState;
   }
 
-  const suggestedPlan = validation.suggested_setup ? buildPlanFromOpenClawSetup(baseState.plan, validation.suggested_setup) : null;
+  const suggestedPlan = validation.suggested_setup
+    ? buildPlanFromOpenClawSetup(baseState.plan, validation.suggested_setup)
+    : null;
   const lockedPlan = getLockedOpenClawPlan(baseState, suggestedPlan);
+
+  // If there's a suggested plan, place the order immediately instead of just locking it
+  if (suggestedPlan && !baseState.execution && baseState.status !== 'entry_placed') {
+    await storeLogEntry(
+      currentSymbol,
+      createLog(
+        'success',
+        `OpenClaw rejected the initial setup but provided a suggestion for ${currentSymbol}. Placing entry order immediately with suggested setup.`,
+      ),
+      true,
+    );
+
+    try {
+      const execution = (await futuresAutoTradeService.executeTrade(suggestedPlan, currentPrice)) as {
+        entryOrder: { orderId: number; status?: string | null; avgPrice?: string | null };
+        entryPrice: number | null;
+        entryFilled: boolean;
+        algoOrderClientIds: string[];
+        allocatedMargin: number;
+        positionSide: 'LONG' | 'SHORT' | null;
+        quantity: number;
+        stopLossAlgoOrder: { algoId: number } | null;
+        takeProfitAlgoOrders: Array<{ algoId: number }>;
+      };
+
+      const executionRecord: FuturesAutoBotExecutionRecord = {
+        allocatedMargin: execution.allocatedMargin,
+        algoOrderClientIds: execution.algoOrderClientIds,
+        entryOrderId: execution.entryOrder.orderId,
+        entryOrderStatus: execution.entryOrder.status ?? null,
+        entryPrice: execution.entryPrice ?? currentPrice,
+        executedAt: new Date().toISOString(),
+        positionSide: execution.positionSide,
+        stopLossAlgoOrderId: execution.stopLossAlgoOrder?.algoId ?? null,
+        takeProfitAlgoOrderIds: execution.takeProfitAlgoOrders.map((order) => order.algoId),
+        quantity: execution.quantity,
+      };
+
+      const executedState: FuturesAutoBotState = {
+        ...baseState,
+        plan: suggestedPlan,
+        execution: executionRecord,
+        status: execution.entryFilled ? 'entry_placed' : 'entry_pending',
+        planSource: 'openclaw',
+        openClawLockedPlan: lockedPlan,
+        lastOpenClawValidationAt: timestamp,
+        lastOpenClawValidationFingerprint: validationFingerprint,
+        planLockedAt: timestamp,
+        planLockExpiresAt: new Date(Date.now() + OPENCLAW_PLAN_LOCK_TTL_MS).toISOString(),
+        updatedAt: timestamp,
+      };
+
+      inMemoryBots.set(currentSymbol, executedState);
+
+      await storeLogEntry(
+        currentSymbol,
+        createLog(
+          'success',
+          execution.entryFilled
+            ? `Initial OpenClaw suggestion executed for ${currentSymbol}. Entry order #${executionRecord.entryOrderId} at ${formatLogPrice(executionRecord.entryPrice)}, TP algo orders ${executionRecord.takeProfitAlgoOrderIds.join(', ') || 'n/a'}, SL algo order ${executionRecord.stopLossAlgoOrderId ?? 'n/a'}.`
+            : `Initial OpenClaw suggestion placed for ${currentSymbol} at ${formatLogPrice(executionRecord.entryPrice)}. Waiting for fill.`,
+        ),
+        true,
+      );
+
+      return executedState;
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      await storeLogEntry(
+        currentSymbol,
+        createLog('error', `Initial OpenClaw suggestion execution failed for ${currentSymbol}: ${errorMsg}`),
+        true,
+      );
+      // Fall through to create rejected state
+    }
+  }
+
+  const finalPlan = lockedPlan
+    ? { ...lockedPlan, notes: [...lockedPlan.notes, ...validation.adjustment_notes] }
+    : baseState.plan;
+
   const rejectedState: FuturesAutoBotState = {
     ...baseState,
     lastOpenClawValidationAt: timestamp,
     lastOpenClawValidationFingerprint: validationFingerprint,
     openClawLockedPlan: lockedPlan,
-    plan: lockedPlan ? { ...lockedPlan, notes: [...lockedPlan.notes, ...validation.adjustment_notes] } : baseState.plan,
+    plan: finalPlan,
     planLockedAt: lockedPlan ? timestamp : null,
     planLockExpiresAt: lockedPlan ? new Date(Date.now() + OPENCLAW_PLAN_LOCK_TTL_MS).toISOString() : null,
     planSource: lockedPlan ? 'openclaw' : 'consensus',
@@ -337,7 +458,10 @@ async function runInitialOpenClawValidation(params: {
   if (suggestedPlan) {
     await storeLogEntry(
       currentSymbol,
-      createLog('info', `Initial OpenClaw suggestion for ${currentSymbol}: ${validation.adjustment_notes.join(' ') || 'No adjustment notes provided.'}`),
+      createLog(
+        'info',
+        `Initial OpenClaw suggestion for ${currentSymbol}: ${validation.adjustment_notes.join(' ') || 'No adjustment notes provided.'}`,
+      ),
       true,
     );
   }
@@ -381,7 +505,9 @@ function getOpenClawUnlockReason(params: {
   return null;
 }
 
-function buildOpenClawValidationFingerprint(params: { consensus: Awaited<ReturnType<typeof futuresAutoConsensusService.buildConsensus>> }) {
+function buildOpenClawValidationFingerprint(params: {
+  consensus: Awaited<ReturnType<typeof futuresAutoConsensusService.buildConsensus>>;
+}) {
   const { consensus } = params;
   const fingerprintPayload = {
     timeframes: consensus.snapshots
@@ -436,7 +562,12 @@ function hasOpenProtectionOrder(
 function inferFilledTakeProfitCount(params: { executionQuantity: number; currentQuantity: number }) {
   const { currentQuantity, executionQuantity } = params;
 
-  if (!Number.isFinite(executionQuantity) || executionQuantity <= 0 || !Number.isFinite(currentQuantity) || currentQuantity <= 0) {
+  if (
+    !Number.isFinite(executionQuantity) ||
+    executionQuantity <= 0 ||
+    !Number.isFinite(currentQuantity) ||
+    currentQuantity <= 0
+  ) {
     return 0;
   }
 
@@ -515,7 +646,9 @@ export class FuturesAutoBotService {
         return positionAmt !== 0;
       });
       const activePositionAmt = parseNumber(activePosition?.positionAmt) ?? 0;
-      const activePositionSide = activePosition ? getPositionSideFromAmount(activePositionAmt, activePosition.positionSide) : null;
+      const activePositionSide = activePosition
+        ? getPositionSideFromAmount(activePositionAmt, activePosition.positionSide)
+        : null;
       const isPositionOpen = current.status === 'entry_placed' || Boolean(activePosition);
 
       const shouldPersistLogs = !isPositionOpen && current.status !== 'entry_placed';
@@ -536,7 +669,13 @@ export class FuturesAutoBotService {
           ),
         );
       } else if (!isPositionOpen && !consensus.consensusSetup) {
-        await storeLogEntry(symbol, createLog('warn', `Consensus unavailable for ${symbol}. Keeping current plan until enough market data loads.`));
+        await storeLogEntry(
+          symbol,
+          createLog(
+            'warn',
+            `Consensus unavailable for ${symbol}. Keeping current plan until enough market data loads.`,
+          ),
+        );
       }
 
       const ticker = await futuresAutoTradeService.getCurrentPrice(symbol);
@@ -547,11 +686,24 @@ export class FuturesAutoBotService {
       }
 
       const activePlan = nextState.plan;
-      const entryLow = activePlan.entryZone.low ?? activePlan.entryMid ?? null;
-      const entryHigh = activePlan.entryZone.high ?? activePlan.entryMid ?? null;
+      // IMPORTANT: Only use explicit entryZone boundaries, never fallback to entryMid for zone check
+      // entryMid is just a reference price, not the zone itself
+      const entryLow = activePlan.entryZone.low ?? null;
+      const entryHigh = activePlan.entryZone.high ?? null;
       const entryMin = entryLow !== null && entryHigh !== null ? Math.min(entryLow, entryHigh) : null;
       const entryMax = entryLow !== null && entryHigh !== null ? Math.max(entryLow, entryHigh) : null;
-      const inEntryZone = entryMin !== null && entryMax !== null ? currentPrice >= entryMin && currentPrice <= entryMax : false;
+      const inEntryZone =
+        entryMin !== null && entryMax !== null ? currentPrice >= entryMin && currentPrice <= entryMax : false;
+
+      // Debug logging for entry zone check
+      if (activePlan.botMode === 'scalping') {
+        console.log(
+          `[bot-entry-check] ${symbol}: source=${current.planSource}, entryZone=[${activePlan.entryZone.low}, ${activePlan.entryZone.high}], entryMid=${activePlan.entryMid}, price=${currentPrice}, inZone=${inEntryZone}, status=${current.status}`,
+        );
+        if (entryLow === null || entryHigh === null) {
+          console.log(`[bot-entry-check-invalid] ${symbol}: NO VALID ENTRY ZONE BOUNDARIES`);
+        }
+      }
       const hasActivePosition = Boolean(activePosition);
       const openClawValidationFingerprint = buildOpenClawValidationFingerprint({
         consensus,
@@ -622,7 +774,10 @@ export class FuturesAutoBotService {
 
         await storeLogEntry(
           symbol,
-          createLog('info', `Existing position detected for ${symbol}. TP/SL already attached, so the bot will keep tracking this trade only.`),
+          createLog(
+            'info',
+            `Existing position detected for ${symbol}. TP/SL already attached, so the bot will keep tracking this trade only.`,
+          ),
           false,
         );
 
@@ -641,7 +796,10 @@ export class FuturesAutoBotService {
         });
 
         if (filledPosition) {
-          const protectionOrders = await futuresAutoTradeService.placeProtectionOrders(nextState.plan, nextState.execution.quantity);
+          const protectionOrders = await futuresAutoTradeService.placeProtectionOrders(
+            nextState.plan,
+            nextState.execution.quantity,
+          );
           const filledState: FuturesAutoBotState = {
             ...scannedState,
             execution: {
@@ -678,7 +836,10 @@ export class FuturesAutoBotService {
       }
 
       if (nextState.status === 'entry_placed' && !hasActivePosition) {
-        const executionHistory = [...(current.executionHistory ?? []), ...(current.execution ? [current.execution] : [])].slice(-20);
+        const executionHistory = [
+          ...(current.executionHistory ?? []),
+          ...(current.execution ? [current.execution] : []),
+        ].slice(-20);
 
         try {
           await futuresAutoTradeService.cancelProtectionOrders(symbol, 'BOTH');
@@ -717,7 +878,9 @@ export class FuturesAutoBotService {
         return await runInitialOpenClawValidation({
           baseState: resetState,
           consensus,
-          currentAccountSize: account ? parseNumber(account.availableBalance ?? account.totalWalletBalance) ?? null : null,
+          currentAccountSize: account
+            ? (parseNumber(account.availableBalance ?? account.totalWalletBalance) ?? null)
+            : null,
           currentPrice,
           currentSymbol: symbol,
         });
@@ -734,10 +897,90 @@ export class FuturesAutoBotService {
         return await runInitialOpenClawValidation({
           baseState: scannedState,
           consensus,
-          currentAccountSize: account ? parseNumber(account.availableBalance ?? account.totalWalletBalance) ?? null : null,
+          currentAccountSize: account
+            ? (parseNumber(account.availableBalance ?? account.totalWalletBalance) ?? null)
+            : null,
           currentPrice,
           currentSymbol: symbol,
         });
+      }
+
+      // Aggressive scalping entry: if in scalping mode and price is in entry zone with ANY valid plan, enter immediately
+      const isScalpingMode = activePlan.botMode === 'scalping';
+      const shouldAggressiveEntry =
+        isScalpingMode && inEntryZone && activePlan.entryZone.low !== null && activePlan.entryZone.high !== null;
+
+      console.log(
+        `[bot-progress] ${symbol}: scalping=${isScalpingMode}, inZone=${inEntryZone}, entryZone=${formatLogPriceRange(entryMin, entryMax)}, price=${formatLogPrice(currentPrice)}, planSource=${current.planSource}, locked=${isOpenClawLockedPlan}`,
+      );
+
+      // Aggressive auto-entry for scalping: Enter immediately if price in zone AND in scalping mode
+      if (isScalpingMode && inEntryZone && !current.execution && current.status !== 'entry_placed') {
+        await storeLogEntry(
+          symbol,
+          createLog(
+            'success',
+            `Scalping auto-entry triggered for ${symbol} at ${formatLogPrice(currentPrice)}. Price ${formatLogPrice(currentPrice)} is in entry zone ${formatLogPriceRange(entryMin, entryMax)}. Executing market order immediately.`,
+          ),
+          shouldPersistLogs,
+        );
+
+        try {
+          const execution = (await futuresAutoTradeService.executeTrade(activePlan, currentPrice)) as {
+            entryOrder: { orderId: number; status?: string | null; avgPrice?: string | null };
+            entryPrice: number | null;
+            entryFilled: boolean;
+            algoOrderClientIds: string[];
+            allocatedMargin: number;
+            positionSide: 'LONG' | 'SHORT' | null;
+            quantity: number;
+            stopLossAlgoOrder: { algoId: number } | null;
+            takeProfitAlgoOrders: Array<{ algoId: number }>;
+          };
+
+          const executionRecord: FuturesAutoBotExecutionRecord = {
+            allocatedMargin: execution.allocatedMargin,
+            algoOrderClientIds: execution.algoOrderClientIds,
+            entryOrderId: execution.entryOrder.orderId,
+            entryOrderStatus: execution.entryOrder.status ?? null,
+            entryPrice: execution.entryPrice ?? currentPrice,
+            executedAt: new Date().toISOString(),
+            positionSide: execution.positionSide,
+            stopLossAlgoOrderId: execution.stopLossAlgoOrder?.algoId ?? null,
+            takeProfitAlgoOrderIds: execution.takeProfitAlgoOrders.map((order) => order.algoId),
+            quantity: execution.quantity,
+          };
+
+          const autoEntryState: FuturesAutoBotState = {
+            ...scannedState,
+            execution: executionRecord,
+            status: execution.entryFilled ? 'entry_placed' : 'entry_pending',
+            updatedAt: new Date().toISOString(),
+          };
+
+          inMemoryBots.set(symbol, autoEntryState);
+
+          await storeLogEntry(
+            symbol,
+            createLog(
+              'success',
+              execution.entryFilled
+                ? `Scalping auto-entry executed for ${symbol}. Entry order #${executionRecord.entryOrderId} at ${formatLogPrice(executionRecord.entryPrice)}, TP algo orders ${executionRecord.takeProfitAlgoOrderIds.join(', ') || 'n/a'}, SL algo order ${executionRecord.stopLossAlgoOrderId ?? 'n/a'}.`
+                : `Scalping auto-entry placed for ${symbol} at ${formatLogPrice(executionRecord.entryPrice)}. Waiting for fill.`,
+            ),
+            shouldPersistLogs,
+          );
+
+          return autoEntryState;
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+          await storeLogEntry(
+            symbol,
+            createLog('error', `Scalping auto-entry failed for ${symbol}: ${errorMsg}`),
+            shouldPersistLogs,
+          );
+          // Continue with normal flow if execution fails
+        }
       }
 
       if (isOpenClawLockedPlan && openClawUnlockReason === null) {
@@ -785,7 +1028,8 @@ export class FuturesAutoBotService {
           openClawLockedPlan: activePlan,
           executionHistory: current.executionHistory ?? [],
           planLockedAt: current.planLockedAt ?? new Date().toISOString(),
-          planLockExpiresAt: current.planLockExpiresAt ?? new Date(Date.now() + OPENCLAW_PLAN_LOCK_TTL_MS).toISOString(),
+          planLockExpiresAt:
+            current.planLockExpiresAt ?? new Date(Date.now() + OPENCLAW_PLAN_LOCK_TTL_MS).toISOString(),
           execution: executionRecord,
           plan: activePlan,
           status: execution.entryFilled ? 'entry_placed' : 'entry_pending',
@@ -807,12 +1051,19 @@ export class FuturesAutoBotService {
         return lockedExecutionState;
       }
 
-      if (!inEntryZone) {
+      const shouldRevalidateOutsideZone = isOpenClawLockedPlan && openClawUnlockReason;
+
+      if (!inEntryZone && !shouldRevalidateOutsideZone) {
         inMemoryBots.set(symbol, scannedState);
         return scannedState;
       }
 
-      if (isOpenClawLockedPlan && !openClawUnlockReason && shouldSkipOpenClawValidation(current, now, openClawValidationFingerprint)) {
+      if (
+        inEntryZone &&
+        isOpenClawLockedPlan &&
+        !openClawUnlockReason &&
+        shouldSkipOpenClawValidation(current, now, openClawValidationFingerprint)
+      ) {
         await storeLogEntry(
           symbol,
           createLog(
@@ -826,13 +1077,24 @@ export class FuturesAutoBotService {
         return scannedState;
       }
 
-      await storeLogEntry(
-        symbol,
-        createLog(
-          'success',
-          `Entry trigger hit for ${symbol} at ${formatLogPrice(currentPrice)}. Placing limit entry at the zone edge and waiting for fill.`,
-        ),
-      );
+      if (shouldRevalidateOutsideZone) {
+        await storeLogEntry(
+          symbol,
+          createLog(
+            'info',
+            `Refreshing OpenClaw plan for ${symbol} at ${formatLogPrice(currentPrice)} — ${openClawUnlockReason}`,
+          ),
+          shouldPersistLogs,
+        );
+      } else if (inEntryZone) {
+        await storeLogEntry(
+          symbol,
+          createLog(
+            'success',
+            `Entry trigger hit for ${symbol} at ${formatLogPrice(currentPrice)}. Placing limit entry at the zone edge and waiting for fill.`,
+          ),
+        );
+      }
 
       const account = await futuresAutoTradeService.getAccount();
       const validation = await futuresAutoValidationService.validateSetup(
@@ -857,19 +1119,101 @@ export class FuturesAutoBotService {
       );
 
       if (validation.validation_result !== 'accepted') {
-        const suggestedPlan = validation.suggested_setup ? buildPlanFromOpenClawSetup(activePlan, validation.suggested_setup) : null;
+        const suggestedPlan = validation.suggested_setup
+          ? buildPlanFromOpenClawSetup(activePlan, validation.suggested_setup)
+          : null;
         const lockedPlan = getLockedOpenClawPlan(current, suggestedPlan);
+
+        // If there's a suggested plan, place the order immediately instead of waiting
+        if (suggestedPlan && !current.execution && current.status !== 'entry_placed') {
+          await storeLogEntry(
+            symbol,
+            createLog(
+              'success',
+              `OpenClaw rejected the current plan but provided a suggestion for ${symbol}. Placing entry order immediately with the suggested setup.`,
+            ),
+          );
+
+          try {
+            const execution = (await futuresAutoTradeService.executeTrade(suggestedPlan, currentPrice)) as {
+              entryOrder: { orderId: number; status?: string | null; avgPrice?: string | null };
+              entryPrice: number | null;
+              entryFilled: boolean;
+              algoOrderClientIds: string[];
+              allocatedMargin: number;
+              positionSide: 'LONG' | 'SHORT' | null;
+              quantity: number;
+              stopLossAlgoOrder: { algoId: number } | null;
+              takeProfitAlgoOrders: Array<{ algoId: number }>;
+            };
+
+            const executionRecord: FuturesAutoBotExecutionRecord = {
+              allocatedMargin: execution.allocatedMargin,
+              algoOrderClientIds: execution.algoOrderClientIds,
+              entryOrderId: execution.entryOrder.orderId,
+              entryOrderStatus: execution.entryOrder.status ?? null,
+              entryPrice: execution.entryPrice ?? currentPrice,
+              executedAt: new Date().toISOString(),
+              positionSide: execution.positionSide,
+              stopLossAlgoOrderId: execution.stopLossAlgoOrder?.algoId ?? null,
+              takeProfitAlgoOrderIds: execution.takeProfitAlgoOrders.map((order) => order.algoId),
+              quantity: execution.quantity,
+            };
+
+            const executedState: FuturesAutoBotState = {
+              ...scannedState,
+              plan: suggestedPlan,
+              execution: executionRecord,
+              status: execution.entryFilled ? 'entry_placed' : 'entry_pending',
+              planSource: 'openclaw',
+              openClawLockedPlan: lockedPlan,
+              lastOpenClawValidationAt: new Date().toISOString(),
+              lastOpenClawValidationFingerprint: openClawValidationFingerprint,
+              planLockedAt: new Date().toISOString(),
+              planLockExpiresAt: new Date(Date.now() + OPENCLAW_PLAN_LOCK_TTL_MS).toISOString(),
+              updatedAt: new Date().toISOString(),
+            };
+
+            inMemoryBots.set(symbol, executedState);
+
+            await storeLogEntry(
+              symbol,
+              createLog(
+                'success',
+                execution.entryFilled
+                  ? `OpenClaw suggested setup executed for ${symbol}. Entry order #${executionRecord.entryOrderId} at ${formatLogPrice(executionRecord.entryPrice)}, TP algo orders ${executionRecord.takeProfitAlgoOrderIds.join(', ') || 'n/a'}, SL algo order ${executionRecord.stopLossAlgoOrderId ?? 'n/a'}.`
+                  : `OpenClaw suggested setup placed for ${symbol} at ${formatLogPrice(executionRecord.entryPrice)}. Waiting for fill before tracking TP/SL.`,
+              ),
+              shouldPersistLogs,
+            );
+
+            return executedState;
+          } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+            await storeLogEntry(
+              symbol,
+              createLog('error', `OpenClaw suggested setup execution failed for ${symbol}: ${errorMsg}`),
+              shouldPersistLogs,
+            );
+            // Fall through to create rejected state
+          }
+        }
+
         const rejectedState: FuturesAutoBotState = {
           ...scannedState,
           planSource: suggestedPlan ? 'openclaw' : (scannedState.planSource ?? current.planSource ?? 'consensus'),
           openClawLockedPlan: lockedPlan,
           lastOpenClawValidationAt: new Date().toISOString(),
           lastOpenClawValidationFingerprint: openClawValidationFingerprint,
-          planLockedAt: lockedPlan ? new Date().toISOString() : (scannedState.planLockedAt ?? current.planLockedAt ?? null),
+          planLockedAt: lockedPlan
+            ? new Date().toISOString()
+            : (scannedState.planLockedAt ?? current.planLockedAt ?? null),
           planLockExpiresAt: lockedPlan
             ? new Date(Date.now() + OPENCLAW_PLAN_LOCK_TTL_MS).toISOString()
             : (scannedState.planLockExpiresAt ?? current.planLockExpiresAt ?? null),
-          plan: lockedPlan ? { ...lockedPlan, notes: [...lockedPlan.notes, ...validation.adjustment_notes] } : scannedState.plan,
+          plan: lockedPlan
+            ? { ...lockedPlan, notes: [...lockedPlan.notes, ...validation.adjustment_notes] }
+            : scannedState.plan,
           updatedAt: new Date().toISOString(),
         };
 
@@ -879,22 +1223,135 @@ export class FuturesAutoBotService {
           createLog(
             'warn',
             suggestedPlan
-              ? `OpenClaw rejected open order for ${symbol} (${validation.confidence.toFixed(2)} confidence): ${validation.reason} Applying suggested setup and waiting for the new zone.`
-              : `OpenClaw rejected open order for ${symbol} (${validation.confidence.toFixed(2)} confidence): ${validation.reason}`,
+              ? `OpenClaw rejected ${shouldRevalidateOutsideZone ? 'plan refresh' : 'open order'} for ${symbol} (${validation.confidence.toFixed(2)} confidence): ${validation.reason}`
+              : `OpenClaw rejected ${shouldRevalidateOutsideZone ? 'plan refresh' : 'open order'} for ${symbol} (${validation.confidence.toFixed(2)} confidence): ${validation.reason}`,
           ),
         );
 
         if (suggestedPlan) {
           await storeLogEntry(
             symbol,
-            createLog('info', `OpenClaw suggested setup for ${symbol}: ${validation.adjustment_notes.join(' ') || 'No adjustment notes provided.'}`),
+            createLog(
+              'info',
+              `OpenClaw suggestion for ${symbol}: ${validation.adjustment_notes.join(' ') || 'No adjustment notes provided.'}`,
+            ),
           );
+
+          // Aggressive scalping entry: if in scalping mode and price is already in suggested entry zone, enter immediately
+          if (isScalpingMode && suggestedPlan.entryZone.low !== null && suggestedPlan.entryZone.high !== null) {
+            const suggestedEntryMin = Math.min(suggestedPlan.entryZone.low, suggestedPlan.entryZone.high);
+            const suggestedEntryMax = Math.max(suggestedPlan.entryZone.low, suggestedPlan.entryZone.high);
+            const inSuggestedZone = currentPrice >= suggestedEntryMin && currentPrice <= suggestedEntryMax;
+
+            console.log(
+              `[aggressive-entry] ${symbol}: inSuggestedZone=${inSuggestedZone}, price=${currentPrice}, zone=${suggestedEntryMin}-${suggestedEntryMax}`,
+            );
+
+            if (inSuggestedZone) {
+              await storeLogEntry(
+                symbol,
+                createLog(
+                  'success',
+                  `Scalping aggressive entry triggered for ${symbol} at ${formatLogPrice(currentPrice)}. Price is in the suggested entry zone ${formatLogPriceRange(suggestedEntryMin, suggestedEntryMax)}. Executing immediately.`,
+                ),
+                shouldPersistLogs,
+              );
+
+              const execution = (await futuresAutoTradeService.executeTrade(suggestedPlan, currentPrice)) as {
+                entryOrder: { orderId: number; status?: string | null; avgPrice?: string | null };
+                entryPrice: number | null;
+                entryFilled: boolean;
+                algoOrderClientIds: string[];
+                allocatedMargin: number;
+                positionSide: 'LONG' | 'SHORT' | null;
+                quantity: number;
+                stopLossAlgoOrder: { algoId: number } | null;
+                takeProfitAlgoOrders: Array<{ algoId: number }>;
+              };
+
+              const executionRecord: FuturesAutoBotExecutionRecord = {
+                allocatedMargin: execution.allocatedMargin,
+                algoOrderClientIds: execution.algoOrderClientIds,
+                entryOrderId: execution.entryOrder.orderId,
+                entryOrderStatus: execution.entryOrder.status ?? null,
+                entryPrice: execution.entryPrice ?? currentPrice,
+                executedAt: new Date().toISOString(),
+                positionSide: execution.positionSide,
+                stopLossAlgoOrderId: execution.stopLossAlgoOrder?.algoId ?? null,
+                takeProfitAlgoOrderIds: execution.takeProfitAlgoOrders.map((order) => order.algoId),
+                quantity: execution.quantity,
+              };
+
+              const aggressiveExecutionState: FuturesAutoBotState = {
+                ...rejectedState,
+                plan: suggestedPlan,
+                execution: executionRecord,
+                status: execution.entryFilled ? 'entry_placed' : 'entry_pending',
+              };
+
+              inMemoryBots.set(symbol, aggressiveExecutionState);
+
+              await storeLogEntry(
+                symbol,
+                createLog(
+                  'success',
+                  execution.entryFilled
+                    ? `Scalping entry executed for ${symbol}. Entry order #${executionRecord.entryOrderId}, TP algo orders ${executionRecord.takeProfitAlgoOrderIds.join(', ') || 'n/a'}, SL algo order ${executionRecord.stopLossAlgoOrderId ?? 'n/a'}.`
+                    : `Scalping entry placed for ${symbol} at ${formatLogPrice(executionRecord.entryPrice)}. Waiting for fill.`,
+                ),
+                shouldPersistLogs,
+              );
+
+              return aggressiveExecutionState;
+            }
+          }
         }
 
         return rejectedState;
       }
 
       const validatedPlan = buildPlanFromOpenClawSetup(activePlan, validation.validated_setup);
+
+      // Save validated plan to coin config
+      const validatedSetup = validation.validated_setup;
+      await updateCoinConfigLastValidatedPlan(symbol, {
+        direction: validatedSetup.direction,
+        entry_zone: validatedSetup.entry_zone,
+        planned_entry: validatedSetup.planned_entry,
+        risk_reward: validatedSetup.risk_reward,
+        setup_type: validatedSetup.setup_type,
+        stop_loss: validatedSetup.stop_loss,
+        take_profit: validatedSetup.take_profit,
+        confidence: validation.confidence,
+      }).catch((error) => {
+        console.error(`[coin-config] Failed to save validated plan for ${symbol}:`, error);
+      });
+
+      if (shouldRevalidateOutsideZone) {
+        const refreshedState: FuturesAutoBotState = {
+          ...scannedState,
+          plan: validatedPlan,
+          openClawLockedPlan: validatedPlan,
+          lastOpenClawValidationAt: new Date().toISOString(),
+          lastOpenClawValidationFingerprint: openClawValidationFingerprint,
+          planLockedAt: new Date().toISOString(),
+          planLockExpiresAt: new Date(Date.now() + OPENCLAW_PLAN_LOCK_TTL_MS).toISOString(),
+          planSource: 'openclaw',
+          updatedAt: new Date().toISOString(),
+        };
+
+        inMemoryBots.set(symbol, refreshedState);
+        await storeLogEntry(
+          symbol,
+          createLog(
+            'success',
+            `OpenClaw plan refreshed for ${symbol}. New entry zone: ${formatLogPriceRange(validatedPlan.entryZone.low, validatedPlan.entryZone.high)}.`,
+          ),
+          shouldPersistLogs,
+        );
+
+        return refreshedState;
+      }
 
       const execution = (await futuresAutoTradeService.executeTrade(validatedPlan, currentPrice)) as {
         entryOrder: { orderId: number; status?: string | null; avgPrice?: string | null };
@@ -958,7 +1415,11 @@ export class FuturesAutoBotService {
       };
 
       inMemoryBots.set(symbol, erroredState);
-      await storeLogEntry(symbol, createLog('error', `Auto bot execution failed for ${symbol}: ${errorMessage}`), current?.status !== 'entry_placed');
+      await storeLogEntry(
+        symbol,
+        createLog('error', `Auto bot execution failed for ${symbol}: ${errorMessage}`),
+        current?.status !== 'entry_placed',
+      );
 
       return erroredState;
     } finally {
@@ -969,19 +1430,53 @@ export class FuturesAutoBotService {
   async start(input: StartFuturesAutoBotInput) {
     const now = new Date().toISOString();
     const status: FuturesAutoBotState['status'] = 'watching';
-    const allocationLabel = input.allocationUnit === 'percent' ? `${input.allocationValue}% of wallet` : `${input.allocationValue} USDT margin`;
+
+    // Load coin config and apply saved allocation/leverage if available
+    const coinConfig = await loadCoinConfig(input.symbol);
+    const finalInput = coinConfig
+      ? {
+          ...input,
+          allocationUnit: coinConfig.allocation.type,
+          allocationValue: coinConfig.allocation.value,
+          leverage: coinConfig.leverage,
+        }
+      : input;
+
+    // Save/update coin config with current allocation and leverage
+    if (coinConfig) {
+      await saveCoinConfig({
+        ...coinConfig,
+        allocation: { type: finalInput.allocationUnit, value: finalInput.allocationValue },
+        leverage: finalInput.leverage,
+        updatedAt: now,
+      });
+    } else {
+      await saveCoinConfig({
+        symbol: input.symbol,
+        allocation: { type: finalInput.allocationUnit, value: finalInput.allocationValue },
+        leverage: finalInput.leverage,
+        lastValidatedPlan: null,
+        lastValidatedAt: null,
+        updatedAt: now,
+      });
+    }
+
+    const allocationLabel =
+      finalInput.allocationUnit === 'percent'
+        ? `${finalInput.allocationValue}% of wallet`
+        : `${finalInput.allocationValue} USDT margin`;
     const executionEndpointLabel = BASE_API_BINANCE()?.includes('demo')
       ? 'Binance demo API'
       : BASE_API_BINANCE()
         ? 'Binance live API'
         : 'Binance demo API';
-    const logMessage = `Start requested for ${input.symbol} on ${executionEndpointLabel}. The bot will keep refreshing the best consensus until entry fills, then stay focused on the open position. Armed for actual entry on ${input.direction} setup with entry ${formatLogPrice(input.entryMid)}, allocation ${allocationLabel}, leverage ${input.leverage}x.`;
+    const logMessage = `Start requested for ${finalInput.symbol} on ${executionEndpointLabel}. The bot will keep refreshing the best consensus until entry fills, then stay focused on the open position. Armed for actual entry on ${finalInput.direction} setup with entry ${formatLogPrice(finalInput.entryMid)}, allocation ${allocationLabel}, leverage ${finalInput.leverage}x.`;
 
     const state: FuturesAutoBotState = {
-      botId: createBotId(input.symbol),
+      botId: createBotId(finalInput.symbol),
       createdAt: now,
       updatedAt: now,
-      plan: input,
+      plan: finalInput,
       executionHistory: [],
       openClawLockedPlan: null,
       lastOpenClawValidationAt: null,
@@ -992,34 +1487,167 @@ export class FuturesAutoBotService {
       status,
     };
 
-    inMemoryBots.set(input.symbol, state);
-    await storeLogEntry(input.symbol, createLog('success', logMessage), true);
+    inMemoryBots.set(finalInput.symbol, state);
+    await storeLogEntry(finalInput.symbol, createLog('success', logMessage), true);
 
     try {
-      const consensus = await futuresAutoConsensusService.buildConsensus(input.symbol);
-      const ticker = await futuresAutoTradeService.getCurrentPrice(input.symbol);
+      const consensus = await futuresAutoConsensusService.buildConsensus(finalInput.symbol);
+      const ticker = await futuresAutoTradeService.getCurrentPrice(finalInput.symbol);
       const currentPrice = Number(ticker.price);
 
       if (!Number.isFinite(currentPrice)) {
         await storeLogEntry(
-          input.symbol,
-          createLog('warn', `Initial OpenClaw validation skipped for ${input.symbol}: unable to parse current market price.`),
+          finalInput.symbol,
+          createLog(
+            'warn',
+            `Initial OpenClaw validation skipped for ${finalInput.symbol}: unable to parse current market price.`,
+          ),
           true,
         );
         return state;
+      }
+
+      // Check for existing open positions before doing OpenClaw validation
+      const openPositions = await futuresAutoTradeService.getOpenPositions(finalInput.symbol);
+      const activePosition = openPositions.find((p) => {
+        if (p.symbol !== finalInput.symbol) return false;
+        const amt = parseNumber(p.positionAmt) ?? 0;
+        return amt !== 0;
+      });
+
+      if (activePosition) {
+        const activePositionAmt = parseNumber(activePosition.positionAmt) ?? 0;
+        const activePositionSide = getPositionSideFromAmount(activePositionAmt, activePosition.positionSide);
+        const protectionQuantity = Math.abs(activePositionAmt);
+        const existingEntryPrice = parseNumber(activePosition.entryPrice) ?? finalInput.entryMid;
+
+        const focusedState: FuturesAutoBotState = {
+          ...state,
+          status: 'entry_placed',
+          updatedAt: new Date().toISOString(),
+        };
+        inMemoryBots.set(finalInput.symbol, focusedState);
+
+        // Check if TP/SL are already in place
+        const [regularOrders, algoOrders] = await futuresAutoTradeService.getOpenOrders(finalInput.symbol);
+        const hasProtectionOrders = hasOpenProtectionOrder(regularOrders, algoOrders, activePositionSide);
+
+        if (!hasProtectionOrders) {
+          // Validate existing position through OpenClaw to get appropriate TP/SL
+          let openClawPlan = finalInput;
+          try {
+            const fifteenMinuteSnapshot = consensus.snapshots.find((snapshot) => snapshot.interval === '15m');
+            const account = await futuresAutoTradeService.getAccount().catch(() => null);
+            const validation = await futuresAutoValidationService.validateSetup(
+              {
+                accountSize: account ? parseNumber(account.availableBalance ?? account.totalWalletBalance) ?? null : null,
+                botMode: finalInput.botMode,
+                consensusSetup: consensus.consensusSetup,
+                setupCandidateOverride: buildValidationSetupCandidateFromPlan(
+                  {
+                    ...finalInput,
+                    entryMid: existingEntryPrice,
+                  },
+                  currentPrice,
+                  fifteenMinuteSnapshot?.supportResistance?.resistance ?? null,
+                  fifteenMinuteSnapshot?.supportResistance?.support ?? null,
+                ),
+                currentPrice,
+                isPerpetual: true,
+                leverage: finalInput.leverage,
+                symbol: finalInput.symbol,
+                timeframeSnapshots: consensus.snapshots,
+              },
+              { bypassCache: true },
+            );
+
+            // Use OpenClaw validated or suggested plan for protection orders
+            // Mirror logic from runInitialOpenClawValidation
+            if (validation.validation_result === 'accepted' && validation.validated_setup) {
+              openClawPlan = buildPlanFromOpenClawSetup(finalInput, validation.validated_setup);
+            } else if (validation.validation_result === 'rejected' && validation.suggested_setup) {
+              openClawPlan = buildPlanFromOpenClawSetup(finalInput, validation.suggested_setup);
+            }
+          } catch (validationError) {
+            const errorMsg = validationError instanceof Error ? validationError.message : 'Unknown validation error';
+            await storeLogEntry(
+              finalInput.symbol,
+              createLog('warn', `OpenClaw validation for existing position skipped: ${errorMsg}. Using consensus plan for TP/SL.`),
+              true,
+            );
+          }
+
+          const takeProfitStartIndex = Math.min(
+            inferFilledTakeProfitCount({
+              currentQuantity: protectionQuantity,
+              executionQuantity: protectionQuantity,
+            }),
+            openClawPlan.takeProfits.length,
+          );
+          const protectionOrders = await futuresAutoTradeService.placeProtectionOrders(openClawPlan, protectionQuantity, {
+            takeProfitStartIndex,
+          });
+          const timestamp = new Date().toISOString();
+          const protectionState: FuturesAutoBotState = {
+            ...focusedState,
+            plan: openClawPlan,
+            planSource: 'openclaw',
+            openClawLockedPlan: openClawPlan,
+            planLockedAt: timestamp,
+            planLockExpiresAt: new Date(Date.now() + OPENCLAW_PLAN_LOCK_TTL_MS).toISOString(),
+            execution: {
+              allocatedMargin: 0,
+              algoOrderClientIds: protectionOrders.algoOrderClientIds,
+              entryOrderId: 0,
+              entryOrderStatus: null,
+              entryPrice: existingEntryPrice,
+              executedAt: timestamp,
+              positionSide: activePositionSide === 'BOTH' ? null : activePositionSide,
+              stopLossAlgoOrderId: protectionOrders.stopLossAlgoOrder?.algoId ?? null,
+              takeProfitAlgoOrderIds: protectionOrders.takeProfitAlgoOrders.map((o) => o.algoId),
+              quantity: protectionQuantity,
+            },
+          };
+          inMemoryBots.set(finalInput.symbol, protectionState);
+          await storeLogEntry(
+            finalInput.symbol,
+            createLog(
+              'success',
+              `Bot started with existing position for ${finalInput.symbol} (${activePositionSide}, qty ${protectionQuantity}). TP/SL were missing — validating through OpenClaw and attaching protection orders. Skipping new entry order.`,
+            ),
+            true,
+          );
+          return protectionState;
+        }
+
+        await storeLogEntry(
+          finalInput.symbol,
+          createLog(
+            'info',
+            `Bot started with existing position for ${finalInput.symbol} (${activePositionSide}, qty ${protectionQuantity}). TP/SL already attached. Skipping new entry order.`,
+          ),
+          true,
+        );
+        return focusedState;
       }
 
       const account = await futuresAutoTradeService.getAccount().catch(() => null);
       return await runInitialOpenClawValidation({
         baseState: state,
         consensus,
-        currentAccountSize: account ? parseNumber(account.availableBalance ?? account.totalWalletBalance) ?? null : null,
+        currentAccountSize: account
+          ? (parseNumber(account.availableBalance ?? account.totalWalletBalance) ?? null)
+          : null,
         currentPrice,
-        currentSymbol: input.symbol,
+        currentSymbol: finalInput.symbol,
       });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown initial OpenClaw validation error.';
-      await storeLogEntry(input.symbol, createLog('warn', `Initial OpenClaw validation skipped for ${input.symbol}: ${errorMessage}`), true);
+      await storeLogEntry(
+        finalInput.symbol,
+        createLog('warn', `Initial OpenClaw validation skipped for ${finalInput.symbol}: ${errorMessage}`),
+        true,
+      );
       return state;
     }
   }
@@ -1028,14 +1656,22 @@ export class FuturesAutoBotService {
     const current = inMemoryBots.get(symbol) ?? null;
 
     if (!current) {
-      await storeLogEntry(symbol, createLog('warn', `Stop requested for ${symbol}, but no active bot was found.`), true);
+      await storeLogEntry(
+        symbol,
+        createLog('warn', `Stop requested for ${symbol}, but no active bot was found.`),
+        true,
+      );
       return null;
     }
 
     if (current.execution || current.status === 'entry_placed') {
       try {
         await futuresAutoTradeService.cancelOpenOrders(symbol);
-        await storeLogEntry(symbol, createLog('success', `Cancelled open orders for ${symbol}.`), current.status !== 'entry_placed');
+        await storeLogEntry(
+          symbol,
+          createLog('success', `Cancelled open orders for ${symbol}.`),
+          current.status !== 'entry_placed',
+        );
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown cancellation error.';
         await storeLogEntry(
@@ -1053,9 +1689,132 @@ export class FuturesAutoBotService {
     };
 
     inMemoryBots.set(symbol, nextState);
-    await storeLogEntry(symbol, createLog('info', `Auto bot stopped for ${symbol}. Active watch loop ended.`), current.status !== 'entry_placed');
+    await storeLogEntry(
+      symbol,
+      createLog('info', `Auto bot stopped for ${symbol}. Active watch loop ended.`),
+      current.status !== 'entry_placed',
+    );
 
     return nextState;
+  }
+
+  async revalidate(symbol: string) {
+    const currentBot = inMemoryBots.get(symbol);
+
+    if (!currentBot) {
+      await storeLogEntry(
+        symbol,
+        createLog('warn', `Revalidation requested for ${symbol}, but no active bot was found.`),
+        true,
+      );
+      return null;
+    }
+
+    const consensus = await futuresAutoConsensusService.buildConsensus(symbol);
+    const currentPrice = currentBot.plan.entryMid; // Use last known entry point as reference
+    const account = await futuresAutoTradeService.getAccount().catch(() => null);
+    const accountSize = account ? (parseNumber(account.availableBalance ?? account.totalWalletBalance) ?? null) : null;
+
+    await storeLogEntry(
+      symbol,
+      createLog('info', `Manual revalidation requested for ${symbol} at ${formatLogPrice(currentPrice)}.`),
+      true,
+    );
+
+    return await runInitialOpenClawValidation({
+      baseState: currentBot,
+      consensus,
+      currentAccountSize: accountSize,
+      currentPrice,
+      currentSymbol: symbol,
+    });
+  }
+
+  async manualEntry(symbol: string) {
+    const currentBot = inMemoryBots.get(symbol);
+
+    if (!currentBot) {
+      await storeLogEntry(
+        symbol,
+        createLog('error', `Manual entry requested for ${symbol}, but no active bot was found.`),
+        true,
+      );
+      return null;
+    }
+
+    const ticker = await futuresAutoTradeService.getCurrentPrice(symbol);
+    const currentPrice = Number(ticker.price);
+
+    if (!Number.isFinite(currentPrice)) {
+      await storeLogEntry(
+        symbol,
+        createLog('error', `Manual entry failed for ${symbol}: Unable to get current market price.`),
+        true,
+      );
+      return null;
+    }
+
+    await storeLogEntry(
+      symbol,
+      createLog(
+        'info',
+        `Manual entry triggered for ${symbol} at market price ${formatLogPrice(currentPrice)}. Executing immediately regardless of validation status.`,
+      ),
+      true,
+    );
+
+    try {
+      const execution = (await futuresAutoTradeService.executeTrade(currentBot.plan, currentPrice)) as {
+        entryOrder: { orderId: number; status?: string | null; avgPrice?: string | null };
+        entryPrice: number | null;
+        entryFilled: boolean;
+        algoOrderClientIds: string[];
+        allocatedMargin: number;
+        positionSide: 'LONG' | 'SHORT' | null;
+        quantity: number;
+        stopLossAlgoOrder: { algoId: number } | null;
+        takeProfitAlgoOrders: Array<{ algoId: number }>;
+      };
+
+      const executionRecord: FuturesAutoBotExecutionRecord = {
+        allocatedMargin: execution.allocatedMargin,
+        algoOrderClientIds: execution.algoOrderClientIds,
+        entryOrderId: execution.entryOrder.orderId,
+        entryOrderStatus: execution.entryOrder.status ?? null,
+        entryPrice: execution.entryPrice ?? currentPrice,
+        executedAt: new Date().toISOString(),
+        positionSide: execution.positionSide,
+        stopLossAlgoOrderId: execution.stopLossAlgoOrder?.algoId ?? null,
+        takeProfitAlgoOrderIds: execution.takeProfitAlgoOrders.map((order) => order.algoId),
+        quantity: execution.quantity,
+      };
+
+      const executedState: FuturesAutoBotState = {
+        ...currentBot,
+        execution: executionRecord,
+        status: execution.entryFilled ? 'entry_placed' : 'entry_pending',
+        updatedAt: new Date().toISOString(),
+      };
+
+      inMemoryBots.set(symbol, executedState);
+
+      await storeLogEntry(
+        symbol,
+        createLog(
+          'success',
+          execution.entryFilled
+            ? `Manual entry executed for ${symbol}. Entry order #${executionRecord.entryOrderId} at ${formatLogPrice(executionRecord.entryPrice)}, TP algo orders ${executionRecord.takeProfitAlgoOrderIds.join(', ') || 'n/a'}, SL algo order ${executionRecord.stopLossAlgoOrderId ?? 'n/a'}.`
+            : `Manual entry placed for ${symbol} at ${formatLogPrice(executionRecord.entryPrice)}. Waiting for fill.`,
+        ),
+        true,
+      );
+
+      return executedState;
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      await storeLogEntry(symbol, createLog('error', `Manual entry execution failed for ${symbol}: ${errorMsg}`), true);
+      return null;
+    }
   }
 
   async clear(symbol: string) {

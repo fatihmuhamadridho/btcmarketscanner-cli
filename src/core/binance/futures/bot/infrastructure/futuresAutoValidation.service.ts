@@ -47,6 +47,7 @@ export type FuturesAutoBotOpenClawValidationResult = {
 };
 type FuturesAutoBotOpenClawValidationInput = {
   accountSize: number | null;
+  botMode: 'scalping' | 'intraday';
   consensusSetup: CoinSetupDetail | null;
   setupCandidateOverride?: CoinValidationSnapshotSetupCandidate | null;
   currentPrice: number;
@@ -65,6 +66,7 @@ const openClawPromptInstructions = [
   'Accept only when the setup is coherent, the higher timeframe bias is aligned enough, and risk/reward is valid.',
   'Reject with accepted=false, concise rejection_reasons, suggested_setup for the best adjusted setup, and validated_setup=null.',
   'If accepted, validated_setup must be the executable plan and suggested_setup must be null.',
+  'Note: This is a {BOT_MODE} trading setup. Adjust timeframe emphasis accordingly.',
 ].join(' ');
 const validationCache = new Map<string, CachedOpenClawValidation>();
 const pendingValidationRequests = new Map<string, Promise<FuturesAutoBotOpenClawValidationResult>>();
@@ -116,7 +118,11 @@ async function writeOpenClawValidationOutcomeLog(
 ) {
   await writeFile(
     join(logDir, 'result.json'),
-    JSON.stringify({ completedAt: new Date().toISOString(), logType: 'validation_result', normalized, response }, null, 2),
+    JSON.stringify(
+      { completedAt: new Date().toISOString(), logType: 'validation_result', normalized, response },
+      null,
+      2,
+    ),
     'utf8',
   );
 }
@@ -147,7 +153,7 @@ function getVolatilityState(price: number | null, atr14: number | null) {
   if (atrRatio < 0.1) return 'high' as const;
   return 'extreme' as const;
 }
-async function runOpenClawValidation(snapshot: CoinValidationSnapshot) {
+async function runOpenClawValidation(snapshot: CoinValidationSnapshot, botMode: 'scalping' | 'intraday' = 'scalping') {
   const { logDir, timestamp } = await createOpenClawValidationLogDir();
   let response: OpenClawValidationResponse | null = null;
   let normalized: FuturesAutoBotOpenClawValidationResult | null = null;
@@ -155,7 +161,10 @@ async function runOpenClawValidation(snapshot: CoinValidationSnapshot) {
   await writeOpenClawValidationRequestLog(logDir, snapshot, timestamp);
 
   try {
-    console.log('[openclaw validation] request', { snapshot });
+    console.log('[openclaw validation] request', { snapshot, botMode });
+
+    const botModeLabel = botMode === 'scalping' ? 'scalping (quick micro trades)' : 'intraday (longer holding periods)';
+    const prompt = openClawPromptInstructions.replace('{BOT_MODE}', botModeLabel);
 
     const rawOutput = await new Promise<string>((resolve, reject) => {
       const child = spawn(
@@ -167,7 +176,7 @@ async function runOpenClawValidation(snapshot: CoinValidationSnapshot) {
           '--thinking',
           'low',
           '--message',
-          `${openClawPromptInstructions}\n\nSnapshot JSON:\n${JSON.stringify(snapshot)}`,
+          `${prompt}\n\nSnapshot JSON:\n${JSON.stringify(snapshot)}`,
         ],
         { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] },
       );
@@ -651,7 +660,7 @@ export class FuturesAutoValidationService {
     }
     const validationPromise = (async () => {
       try {
-        const rawResponse = await runOpenClawValidation(snapshot);
+        const rawResponse = await runOpenClawValidation(snapshot, input.botMode);
         const parsedResult = parseValidationResult(snapshot, rawResponse);
         writeCachedValidation(cacheKey, parsedResult, DEFAULT_CACHE_TTL_MS);
         return parsedResult;

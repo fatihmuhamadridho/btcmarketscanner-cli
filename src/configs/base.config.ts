@@ -59,7 +59,11 @@ export function getBinanceCredentialSource() {
     return 'env';
   }
 
-  if (!isDevelopmentMode() && runtimeConfig.auth.profiles.binance.api_key.trim() && runtimeConfig.auth.profiles.binance.secret_key.trim()) {
+  if (
+    !isDevelopmentMode() &&
+    runtimeConfig.auth.profiles.binance.api_key.trim() &&
+    runtimeConfig.auth.profiles.binance.secret_key.trim()
+  ) {
     return 'json';
   }
 

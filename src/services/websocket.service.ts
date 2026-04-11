@@ -13,6 +13,10 @@ export class WebsocketService {
   private socket: WebSocket | null = null;
   private readonly options: WebsocketServiceOptions;
   private readonly messageHandlers = new Set<WebsocketEventHandler>();
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private reconnectDelay = 1000;
+  private reconnectPath = '';
 
   constructor(options?: WebsocketServiceOptions) {
     this.options = { ...options };
@@ -41,15 +45,68 @@ export class WebsocketService {
       return this.socket;
     }
 
+    this.reconnectPath = path;
     this.socket = new WebSocket(this.resolveUrl(path), this.options.protocols);
     this.socket.addEventListener('message', this.handleMessage);
+    this.socket.addEventListener('error', this.handleError);
+    this.socket.addEventListener('close', this.handleClose);
+    this.socket.addEventListener('open', this.handleOpen);
 
     return this.socket;
   }
 
+  private readonly handleOpen = () => {
+    this.reconnectAttempts = 0; // Reset counter on successful connection
+    console.log('[websocket] Connection established successfully.');
+  };
+
+  private readonly handleError = (event: Event) => {
+    console.warn('[websocket] Connection error:', event);
+  };
+
+  private readonly handleClose = (event: CloseEvent) => {
+    console.warn(
+      `[websocket] Connection closed (code: ${event.code}, reason: ${event.reason || 'none'}), attempting to reconnect...`,
+    );
+    this.attemptReconnect();
+  };
+
+  private attemptReconnect = () => {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.error('[websocket] Max reconnection attempts reached, giving up.');
+      console.error(`[websocket] Handlers still registered: ${this.messageHandlers.size}`);
+      console.error(`[websocket] Last path: ${this.reconnectPath}`);
+      return;
+    }
+
+    this.reconnectAttempts += 1;
+    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
+    console.log(
+      `[websocket] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts}) with path: ${this.reconnectPath}...`,
+    );
+
+    setTimeout(() => {
+      try {
+        console.log(`[websocket] Executing reconnect attempt #${this.reconnectAttempts}...`);
+        this.connect(this.reconnectPath);
+      } catch (error) {
+        console.error('[websocket] Reconnection attempt failed:', error);
+        this.attemptReconnect();
+      }
+    }, delay);
+  };
+
   private readonly handleMessage = (event: MessageEvent<string>) => {
+    if (this.messageHandlers.size === 0) {
+      console.warn('[websocket] Message received but no handlers registered');
+      return;
+    }
     for (const handler of this.messageHandlers) {
-      handler(event);
+      try {
+        handler(event);
+      } catch (error) {
+        console.error('[websocket] Error in message handler:', error);
+      }
     }
   };
 
@@ -73,9 +130,12 @@ export class WebsocketService {
     if (!this.socket) return;
 
     this.socket.removeEventListener('message', this.handleMessage);
+    this.socket.removeEventListener('error', this.handleError);
+    this.socket.removeEventListener('close', this.handleClose);
     this.socket.close(code, reason);
     this.socket = null;
     this.messageHandlers.clear();
+    this.reconnectAttempts = 0; // Reset reconnect counter
   }
 
   get readyState() {

@@ -101,6 +101,7 @@ export function TradingDashboard({
   panelWidth,
   leverage,
   allocationLabel,
+  terminalLevels,
 }: {
   snapshot: MarketSnapshot;
   mode: MarketMode;
@@ -111,6 +112,11 @@ export function TradingDashboard({
   panelWidth: number;
   leverage: number;
   allocationLabel: string;
+  terminalLevels: {
+    entry: number | null;
+    stopLoss: number | null;
+    takeProfits: Record<'tp1' | 'tp2' | 'tp3', number | null>;
+  };
 }) {
   const marketCandles = liveState.initialCandles.length
     ? liveState.initialCandles
@@ -221,6 +227,13 @@ export function TradingDashboard({
               {line('leverage', <Text color="#8be9fd">{`${leverage}x`}</Text>, 14)}
               {line('allocation', <Text color="#f1fa8c">{allocationLabel}</Text>, 14)}
               {line(
+                'bot-mode',
+                <Text color={liveState.bot?.plan.botMode === 'scalping' ? '#50fa7b' : '#8be9fd'}>
+                  {liveState.bot?.plan.botMode ?? 'n/a'}
+                </Text>,
+                14,
+              )}
+              {line(
                 'plan-source',
                 <Text color={liveState.bot?.planSource === 'openclaw' ? '#f1fa8c' : '#8be9fd'}>
                   {liveState.bot?.planSource ?? 'n/a'}
@@ -235,6 +248,14 @@ export function TradingDashboard({
                 14,
               )}
               {line(
+                'direction',
+                <Text color={tone(liveState.bot?.plan.direction ?? '')} bold>
+                  {liveState.bot?.plan.direction ? liveState.bot.plan.direction.toUpperCase() : 'n/a'}
+                </Text>,
+                14,
+              )}
+              {line('planned-entry', <Text color="#50fa7b">{price(liveState.bot?.plan.entryMid ?? null)}</Text>, 14)}
+              {line(
                 'entry-zone',
                 <>
                   <Text color="#50fa7b">{price(liveState.bot?.plan.entryZone.low ?? null)}</Text> /{' '}
@@ -245,11 +266,107 @@ export function TradingDashboard({
               {line(
                 'tp1-sl',
                 <>
-                  TP1 <Text color="#f1fa8c">{price(liveState.bot?.plan.takeProfits[0]?.price ?? null)}</Text> SL{' '}
-                  <Text color="#ff6b6b">{price(liveState.bot?.plan.stopLoss ?? null)}</Text>
+                  TP1 <Text color="#f1fa8c">{price(liveState.bot?.plan.takeProfits[0]?.price ?? null)}</Text>
+                  {liveState.bot?.plan.entryMid !== null && liveState.bot?.plan.takeProfits[0]?.price !== null ? (
+                    <Text color="#8b949e">
+                      {' '}
+                      (+
+                      {proximity(
+                        liveState.bot?.plan.takeProfits[0]?.price ?? null,
+                        liveState.bot?.plan.entryMid ?? null,
+                      )?.toFixed(2)}
+                      %)
+                    </Text>
+                  ) : null}{' '}
+                  SL <Text color="#ff6b6b">{price(liveState.bot?.plan.stopLoss ?? null)}</Text>
+                  {liveState.bot?.plan.entryMid !== null && liveState.bot?.plan.stopLoss !== null ? (
+                    <Text color="#8b949e">
+                      {' '}
+                      (
+                      {proximity(liveState.bot?.plan.stopLoss ?? null, liveState.bot?.plan.entryMid ?? null)?.toFixed(
+                        2,
+                      )}
+                      %)
+                    </Text>
+                  ) : null}
                 </>,
                 14,
               )}
+              {terminalLevels.stopLoss !== null ||
+              terminalLevels.takeProfits.tp1 !== null ||
+              terminalLevels.takeProfits.tp2 !== null ||
+              terminalLevels.takeProfits.tp3 !== null ? (
+                <>
+                  {line(
+                    'manual-sl',
+                    terminalLevels.stopLoss !== null ? (
+                      <>
+                        <Text color="#ff6b6b">{price(terminalLevels.stopLoss)}</Text>
+                        {liveState.bot?.plan.entryMid !== null ? (
+                          <Text color="#8b949e">
+                            {' '}
+                            ({proximity(terminalLevels.stopLoss, liveState.bot?.plan.entryMid ?? null)?.toFixed(2)}%)
+                          </Text>
+                        ) : null}
+                      </>
+                    ) : (
+                      <Text color="#8b949e">not set</Text>
+                    ),
+                    14,
+                  )}
+                  {line(
+                    'manual-tp',
+                    <>
+                      {terminalLevels.takeProfits.tp1 !== null && (
+                        <>
+                          TP1 <Text color="#f1fa8c">{price(terminalLevels.takeProfits.tp1)}</Text>
+                          {liveState.bot?.plan.entryMid !== null ? (
+                            <Text color="#8b949e">
+                              {' '}
+                              (+
+                              {proximity(terminalLevels.takeProfits.tp1, liveState.bot?.plan.entryMid ?? null)?.toFixed(
+                                2,
+                              )}
+                              %)
+                            </Text>
+                          ) : null}{' '}
+                        </>
+                      )}
+                      {terminalLevels.takeProfits.tp2 !== null && (
+                        <>
+                          TP2 <Text color="#f1fa8c">{price(terminalLevels.takeProfits.tp2)}</Text>
+                          {liveState.bot?.plan.entryMid !== null ? (
+                            <Text color="#8b949e">
+                              {' '}
+                              (+
+                              {proximity(terminalLevels.takeProfits.tp2, liveState.bot?.plan.entryMid ?? null)?.toFixed(
+                                2,
+                              )}
+                              %)
+                            </Text>
+                          ) : null}{' '}
+                        </>
+                      )}
+                      {terminalLevels.takeProfits.tp3 !== null && (
+                        <>
+                          TP3 <Text color="#f1fa8c">{price(terminalLevels.takeProfits.tp3)}</Text>
+                          {liveState.bot?.plan.entryMid !== null ? (
+                            <Text color="#8b949e">
+                              {' '}
+                              (+
+                              {proximity(terminalLevels.takeProfits.tp3, liveState.bot?.plan.entryMid ?? null)?.toFixed(
+                                2,
+                              )}
+                              %)
+                            </Text>
+                          ) : null}
+                        </>
+                      )}
+                    </>,
+                    14,
+                  )}
+                </>
+              ) : null}
               {line('open-orders', <Text color="#f1fa8c">{openOrderCount}</Text>, 14)}
               {line('open-positions', <Text color="#f1fa8c">{openPositionCount}</Text>, 14)}
             </Panel>
