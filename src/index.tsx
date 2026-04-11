@@ -1,11 +1,19 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Box, Text, render, useInput } from 'ink';
 import { analyzeSetupSide, analyzeTrend, getSupportResistance } from 'btcmarketscanner-core';
-import { getBinanceProfileLabel, getRuntimeMode, setRuntimeConfig } from '@configs/base.config';
+import {
+  BINANCE_API_KEY,
+  BINANCE_SECRET_KEY,
+  getBinanceCredentialSource,
+  getBinanceProfileLabel,
+  getRuntimeMode,
+  setRuntimeConfig,
+} from '@configs/base.config';
 import { BotLogs } from '@components/molecules/BotLogs.molecule';
 import { CommandBar } from '@components/molecules/CommandBar.molecule';
 import { CommandHistory } from '@components/molecules/CommandHistory.molecule';
 import { IntervalPicker, type IntervalPickerItem } from '@components/molecules/IntervalPicker.molecule';
+import { SetupInput } from '@components/molecules/SetupInput.molecule';
 import { CommandSuggestions } from '@components/molecules/CommandSuggestions.molecule';
 import { SetupMenu } from '@components/molecules/SetupMenu.molecule';
 import { SetupPicker } from '@components/molecules/SetupPicker.molecule';
@@ -24,6 +32,7 @@ import {
   applyTerminalCommand,
   formatAvailableCommands,
   getDefaultTerminalState,
+  SETUP_ALLOCATION_UNIT_OPTIONS,
   SETUP_LEVERAGE_OPTIONS,
   SETUP_MENU_OPTIONS,
 } from '@lib/command-parser';
@@ -31,6 +40,7 @@ import {
 const futuresMarketController = new FuturesMarketController();
 const futuresExchangeInfoController = new FuturesExchangeInfoController();
 const futuresPriceWebsocketService = new WebsocketService();
+const futuresAccountWebsocketService = new WebsocketService();
 
 function restoreInteractiveTerminal() {
   if (!process.stdin.isTTY) {
@@ -44,32 +54,15 @@ function restoreInteractiveTerminal() {
   process.stdin.resume();
 }
 
-function isWatchMode() {
-  return process.execArgv.includes('--watch') || process.execArgv.includes('--watch-path');
-}
-
 function exitTerminalApp(code = 0) {
   futuresPriceWebsocketService.close();
+  futuresAccountWebsocketService.close();
 
   if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
     process.stdin.setRawMode(false);
   }
 
   process.stdin.pause();
-
-  if (isWatchMode() && process.ppid > 1) {
-    try {
-      process.kill(process.ppid, 'SIGTERM');
-    } catch {
-      // Ignore if the parent process is already gone.
-    }
-
-    try {
-      process.kill(process.ppid, 'SIGKILL');
-    } catch {
-      // Ignore if the parent process is already gone.
-    }
-  }
 
   process.exit(code);
 }
@@ -88,9 +81,9 @@ function buildMarketSnapshotFromLive(terminal: TerminalState, live: LiveMarketSt
     close: candle.close,
     volume: candle.volume,
   }));
-  const supportResistance = getSupportResistance(candles, 10);
+  const supportResistance = getSupportResistance(candles, Math.min(50, candles.length));
   const strongSupportResistance =
-    getSupportResistance(candles, Math.max(20, Math.min(50, candles.length))) ?? supportResistance;
+    getSupportResistance(candles, Math.min(150, candles.length)) ?? supportResistance;
   const trend = analyzeTrend(candles, supportResistance);
   const setupSide = trend.direction === 'bullish' ? 'long' : 'short';
   const setup = analyzeSetupSide(setupSide, candles, trend, supportResistance);
@@ -107,10 +100,16 @@ function buildMarketSnapshotFromLive(terminal: TerminalState, live: LiveMarketSt
   };
 }
 
-function buildAutoBotPlan(snapshot: MarketSnapshot, currentPrice: number, leverage: number) {
+function buildAutoBotPlan(
+  snapshot: MarketSnapshot,
+  currentPrice: number,
+  leverage: number,
+  allocationUnit: 'percent' | 'usdt',
+  allocationValue: number,
+) {
   return {
-    allocationUnit: 'percent' as const,
-    allocationValue: 10,
+    allocationUnit,
+    allocationValue,
     currentPrice,
     direction: snapshot.setup.direction,
     entryMid: snapshot.setup.entryMid,
@@ -194,8 +193,51 @@ function parseBalance(value?: string | null) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function parseUserDataAccountUpdate(message: string) {
+  try {
+    const parsed = JSON.parse(message) as {
+      e?: string;
+      a?: {
+        B?: Array<{
+          a?: string;
+          wb?: string;
+          cw?: string;
+        }>;
+      };
+    };
+    if (parsed.e !== 'ACCOUNT_UPDATE') return null;
+    const balance = parsed.a?.B?.find((item) => item.a === 'USDT') ?? parsed.a?.B?.[0];
+    if (!balance) return null;
+    return {
+      availableBalance: parseBalance(balance.cw ?? null),
+      totalMarginBalance: parseBalance(balance.cw ?? null),
+      walletBalance: parseBalance(balance.wb ?? null),
+      subtitle: 'Binance futures account (websocket)',
+    };
+  } catch {
+    return null;
+  }
+}
+
 function formatBalance(value: number | null) {
   return value === null ? 'n/a' : `${value.toFixed(2)} USDT`;
+}
+
+function formatAllocationLabel(unit: 'percent' | 'usdt', value: number) {
+  return unit === 'usdt' ? `${value.toFixed(value >= 10 ? 0 : 2)} USDT` : `${value.toFixed(2)}%`;
+}
+
+function parseSetupInputValue(raw: string) {
+  const normalized = raw.trim().replace(',', '.');
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function maskSecret(value: string | null | undefined) {
+  const secret = value?.trim() ?? '';
+  if (secret.length === 0) return 'n/a';
+  if (secret.length <= 8) return `${secret.slice(0, 2)}…${secret.slice(-2)}`;
+  return `${secret.slice(0, 4)}…${secret.slice(-4)}`;
 }
 
 function buildWatchPickerItems(liveState: LiveMarketState, watchlist: string[]): WatchPickerItem[] {
@@ -446,9 +488,22 @@ function App() {
             setupMenuOpen: false,
             setupMenuSelectedIndex: 0,
             setupPickerOpen: true,
+            setupPickerMode: 'leverage',
             setupPickerSelectedIndex: Math.max(
               0,
               SETUP_LEVERAGE_OPTIONS.findIndex((option) => option.leverage === current.leverage),
+            ),
+          }));
+        } else if (selectedItem?.key === 'allocation') {
+          setTerminal((current) => ({
+            ...current,
+            setupMenuOpen: false,
+            setupMenuSelectedIndex: 0,
+            setupPickerOpen: true,
+            setupPickerMode: 'allocationUnit',
+            setupPickerSelectedIndex: Math.max(
+              0,
+              SETUP_ALLOCATION_UNIT_OPTIONS.findIndex((option) => option.unit === current.allocationUnit),
             ),
           }));
         }
@@ -470,13 +525,15 @@ function App() {
       }
 
       if (key.upArrow || key.downArrow) {
+        const itemCount =
+          terminal.setupPickerMode === 'leverage' ? SETUP_LEVERAGE_OPTIONS.length : SETUP_ALLOCATION_UNIT_OPTIONS.length;
         setTerminal((current) => ({
           ...current,
           setupPickerSelectedIndex: key.upArrow
             ? current.setupPickerSelectedIndex <= 0
-              ? SETUP_LEVERAGE_OPTIONS.length - 1
+              ? itemCount - 1
               : current.setupPickerSelectedIndex - 1
-            : current.setupPickerSelectedIndex >= SETUP_LEVERAGE_OPTIONS.length - 1
+            : current.setupPickerSelectedIndex >= itemCount - 1
               ? 0
               : current.setupPickerSelectedIndex + 1,
         }));
@@ -484,18 +541,95 @@ function App() {
       }
 
       if (key.return) {
-        const selectedItem = SETUP_LEVERAGE_OPTIONS[terminal.setupPickerSelectedIndex] ?? SETUP_LEVERAGE_OPTIONS[0];
-        if (selectedItem) {
+        if (terminal.setupPickerMode === 'leverage') {
+          const selectedItem = SETUP_LEVERAGE_OPTIONS[terminal.setupPickerSelectedIndex] ?? SETUP_LEVERAGE_OPTIONS[0];
           setTerminal((current) => ({
             ...current,
             leverage: selectedItem.leverage,
             setupPickerOpen: false,
+            setupPickerMode: 'leverage',
             setupPickerSelectedIndex: SETUP_LEVERAGE_OPTIONS.findIndex(
               (option) => option.leverage === selectedItem.leverage,
             ),
           }));
-          setCommandInput('');
+        } else {
+          const selectedItem =
+            SETUP_ALLOCATION_UNIT_OPTIONS[terminal.setupPickerSelectedIndex] ?? SETUP_ALLOCATION_UNIT_OPTIONS[0];
+          setTerminal((current) => ({
+            ...current,
+            setupPickerOpen: false,
+            setupPickerMode: 'allocationUnit',
+            setupPickerSelectedIndex: SETUP_ALLOCATION_UNIT_OPTIONS.findIndex(
+              (option) => option.unit === selectedItem.unit,
+            ),
+            setupInputOpen: true,
+            setupInputUnit: selectedItem.unit,
+            setupInputValue: current.allocationUnit === selectedItem.unit ? String(current.allocationValue) : '',
+          }));
         }
+        setCommandInput('');
+        return;
+      }
+
+      return;
+    }
+
+    if (terminal.setupInputOpen) {
+      if (key.ctrl && input === 'c') {
+        exitTerminalApp(0);
+        return;
+      }
+
+      if (key.escape) {
+        setTerminal((current) => ({ ...current, setupInputOpen: false, setupInputValue: '' }));
+        return;
+      }
+
+      if (key.return) {
+        const parsed = parseSetupInputValue(terminal.setupInputValue);
+        if (parsed === null || parsed <= 0) {
+          setTerminal((current) => ({
+            ...current,
+            history: [
+              ...current.history,
+              {
+                input: '/setup',
+                kind: 'error',
+                message: `Invalid ${current.setupInputUnit === 'usdt' ? 'amount' : 'percentage'} value.`,
+              },
+            ],
+          }));
+          return;
+        }
+
+        setTerminal((current) => ({
+          ...current,
+          allocationUnit: current.setupInputUnit,
+          allocationValue: Number(parsed.toFixed(4)),
+          setupInputOpen: false,
+          setupInputValue: '',
+          history: [
+            ...current.history,
+            {
+              input: '/setup',
+              kind: 'system',
+              message:
+                current.setupInputUnit === 'usdt'
+                  ? `Entry balance set to ${Number(parsed.toFixed(4))} USDT.`
+                  : `Entry allocation set to ${Number(parsed.toFixed(4))}%.`,
+            },
+          ],
+        }));
+        return;
+      }
+
+      if (key.backspace || key.delete) {
+        setTerminal((current) => ({ ...current, setupInputValue: current.setupInputValue.slice(0, -1) }));
+        return;
+      }
+
+      if (/^[0-9.,]$/.test(input) && !key.ctrl && !key.meta) {
+        setTerminal((current) => ({ ...current, setupInputValue: `${current.setupInputValue}${input}` }));
         return;
       }
 
@@ -660,6 +794,7 @@ function App() {
           levels: nextLevels,
           setupMenuSelectedIndex: result.state.setupMenuSelectedIndex ?? current.setupMenuSelectedIndex,
           setupPickerSelectedIndex: result.state.setupPickerSelectedIndex ?? current.setupPickerSelectedIndex,
+          setupPickerMode: result.state.setupPickerMode ?? current.setupPickerMode,
           watchPickerSelectedIndex: result.state.watchPickerSelectedIndex ?? current.watchPickerSelectedIndex,
           intervalPickerSelectedIndex: result.state.intervalPickerSelectedIndex ?? current.intervalPickerSelectedIndex,
           history: [
@@ -773,13 +908,13 @@ function App() {
     if (terminal.setupPickerOpen) {
       setTerminal((current) => ({
         ...current,
-        setupPickerSelectedIndex: Math.max(
-          0,
-          SETUP_LEVERAGE_OPTIONS.findIndex((option) => option.leverage === current.leverage),
-        ),
+        setupPickerSelectedIndex:
+          current.setupPickerMode === 'leverage'
+            ? Math.max(0, SETUP_LEVERAGE_OPTIONS.findIndex((option) => option.leverage === current.leverage))
+            : Math.max(0, SETUP_ALLOCATION_UNIT_OPTIONS.findIndex((option) => option.unit === current.allocationUnit)),
       }));
     }
-  }, [terminal.setupPickerOpen]);
+  }, [terminal.setupPickerOpen, terminal.setupPickerMode]);
 
   useEffect(() => {
     if (typeof WebSocket === 'undefined') {
@@ -855,6 +990,42 @@ function App() {
   }, [terminal.activeSymbol]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    async function connectAccountStream() {
+      try {
+        const listenKey = await futuresAutoTradeService.getListenKey();
+        if (cancelled) return;
+
+        const socket = futuresAccountWebsocketService.connect(`/${listenKey}`);
+        socket.onmessage = (event) => {
+          const account = parseUserDataAccountUpdate(event.data);
+          if (!account) return;
+
+          setLiveState((current) => ({
+            ...current,
+            account: current.account
+              ? { ...current.account, ...account }
+              : {
+                  displayName: getBinanceProfileLabel(),
+                  ...account,
+                },
+          }));
+        };
+      } catch {
+        // Keep the existing REST fallback. The profile can still render if the signed request works.
+      }
+    }
+
+    void connectAccountStream();
+
+    return () => {
+      cancelled = true;
+      futuresAccountWebsocketService.close();
+    };
+  }, [terminal.activeSymbol]);
+
+  useEffect(() => {
     setSelectedSuggestionIndex(0);
   }, [commandInput]);
 
@@ -911,36 +1082,36 @@ function App() {
           symbolSnapshot !== null ||
           symbolDetail !== null;
         const account = accountResult.account;
-        const profileDebug =
-          accountResult.debug !== 'account_ok'
-            ? accountResult.debug.length > 0
-              ? accountResult.debug
-              : 'account_request_failed'
-            : account && (!account.availableBalance || !account.totalWalletBalance)
-              ? 'empty_balance_fields'
-              : null;
-        const liveDataRootCause = describeLiveDataRootCause({
-          initialCandles: initialCandles.length,
-          currentPrice: liveState.currentPrice,
+          const profileDebug =
+            accountResult.debug !== 'account_ok'
+              ? accountResult.debug.length > 0
+                ? accountResult.debug
+                : 'account_request_failed'
+              : account && (!account.availableBalance || !account.totalWalletBalance)
+                ? 'empty_balance_fields'
+                : null;
+          const liveDataRootCause = describeLiveDataRootCause({
+            initialCandles: initialCandles.length,
+            currentPrice: liveState.currentPrice,
           exchangeInfoSummary,
           overview,
           symbolSnapshot,
           symbolDetail,
         });
-        setLiveState((current) => ({
-          ...current,
-          account: account
-            ? {
-                displayName: getBinanceProfileLabel(),
-                availableBalance: parseBalance(account.availableBalance ?? null),
-                totalMarginBalance: parseBalance(account.totalMarginBalance ?? null),
-                walletBalance: parseBalance(account.totalWalletBalance ?? null),
-                subtitle:
-                  account.availableBalance || account.totalWalletBalance
-                    ? 'Binance futures account'
-                    : 'Account data unavailable',
-              }
-            : null,
+          setLiveState((current) => ({
+            ...current,
+            account: account
+              ? {
+                  displayName: getBinanceProfileLabel(),
+                  availableBalance: parseBalance(account.availableBalance ?? null),
+                  totalMarginBalance: parseBalance(account.totalMarginBalance ?? null),
+                  walletBalance: parseBalance(account.totalWalletBalance ?? null),
+                  subtitle:
+                    account.availableBalance || account.totalWalletBalance
+                      ? 'Binance futures account'
+                      : 'Account data unavailable',
+                }
+              : null,
           profileDebug,
           exchangeInfoSummary,
           overview,
@@ -955,7 +1126,7 @@ function App() {
           loading: false,
           error: hasRenderableData ? null : liveDataRootCause,
           lastUpdatedAt: new Date().toISOString(),
-        }));
+          }));
 
         const liveSnapshotState = {
           account: account
@@ -995,7 +1166,13 @@ function App() {
           const currentBot = bot ?? (await futuresAutoBotService.getResolved(terminal.activeSymbol).catch(() => null));
           if (!currentBot) {
             await futuresAutoBotService.start(
-              buildAutoBotPlan(snapshotForBot, liveState.currentPrice, terminal.leverage),
+              buildAutoBotPlan(
+                snapshotForBot,
+                liveState.currentPrice,
+                terminal.leverage,
+                terminal.allocationUnit,
+                terminal.allocationValue,
+              ),
             );
           }
         } else if (!terminal.autoTrade) {
@@ -1047,6 +1224,7 @@ function App() {
   );
   const runtimeMode = getRuntimeMode();
   const profileLabel = getBinanceProfileLabel();
+  const credentialSource = getBinanceCredentialSource();
 
   return (
     <Box flexDirection="column" padding={1} height={terminalHeight}>
@@ -1170,6 +1348,18 @@ function App() {
                 <Text color="#8b949e">note: </Text>
                 <Text color="#c9d1d9">{liveState.account?.subtitle ?? 'Account data unavailable'}</Text>
               </Text>
+              <Text>
+                <Text color="#8b949e">source: </Text>
+                <Text color="#f1fa8c">{credentialSource}</Text>
+              </Text>
+              <Text>
+                <Text color="#8b949e">api key: </Text>
+                <Text color="#f1fa8c">{maskSecret(BINANCE_API_KEY())}</Text>
+              </Text>
+              <Text>
+                <Text color="#8b949e">secret: </Text>
+                <Text color="#f1fa8c">{maskSecret(BINANCE_SECRET_KEY())}</Text>
+              </Text>
               {liveState.profileDebug ? (
                 <Text>
                   <Text color="#8b949e">debug: </Text>
@@ -1189,14 +1379,28 @@ function App() {
         {terminal.setupMenuOpen ? (
           <SetupMenu
             selectedIndex={Math.min(terminal.setupMenuSelectedIndex, Math.max(0, SETUP_MENU_OPTIONS.length - 1))}
+            leverage={terminal.leverage}
+            allocationLabel={formatAllocationLabel(terminal.allocationUnit, terminal.allocationValue)}
             width={panelWidth}
           />
         ) : null}
         {terminal.setupPickerOpen ? (
           <SetupPicker
-            selectedIndex={Math.min(terminal.setupPickerSelectedIndex, Math.max(0, SETUP_LEVERAGE_OPTIONS.length - 1))}
+            mode={terminal.setupPickerMode}
+            selectedIndex={Math.min(
+              terminal.setupPickerSelectedIndex,
+              Math.max(
+                0,
+                (terminal.setupPickerMode === 'leverage'
+                  ? SETUP_LEVERAGE_OPTIONS.length
+                  : SETUP_ALLOCATION_UNIT_OPTIONS.length) - 1,
+              ),
+            )}
             width={panelWidth}
           />
+        ) : null}
+        {terminal.setupInputOpen ? (
+          <SetupInput unit={terminal.setupInputUnit} value={terminal.setupInputValue} width={panelWidth} />
         ) : null}
         {terminal.watchPickerOpen ? (
           <WatchPicker
@@ -1220,6 +1424,8 @@ function App() {
           liveState={liveState}
           view={terminal.view}
           panelWidth={panelWidth}
+          leverage={terminal.leverage}
+          allocationLabel={formatAllocationLabel(terminal.allocationUnit, terminal.allocationValue)}
         />
       ) : null}
 

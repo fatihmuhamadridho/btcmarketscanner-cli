@@ -1,6 +1,8 @@
 export type TerminalMode = '1m' | '5m' | '15m' | '1h' | '4h';
 export type TerminalView = 'overview' | 'market' | 'bot' | 'orders' | 'history';
 export type TerminalSetupLeverageOption = 1 | 2 | 3 | 5 | 10 | 15 | 20 | 25 | 50 | 75 | 100 | 125 | 150;
+export type TerminalAllocationUnit = 'percent' | 'usdt';
+export type TerminalSetupPickerMode = 'leverage' | 'allocationUnit';
 
 export type TerminalLevelState = {
   entry: number | null;
@@ -20,10 +22,16 @@ export type TerminalState = {
   levels: TerminalLevelState;
   mode: TerminalMode;
   leverage: number;
+  allocationUnit: TerminalAllocationUnit;
+  allocationValue: number;
   setupMenuOpen: boolean;
   setupMenuSelectedIndex: number;
   setupPickerOpen: boolean;
   setupPickerSelectedIndex: number;
+  setupPickerMode: TerminalSetupPickerMode;
+  setupInputOpen: boolean;
+  setupInputUnit: TerminalAllocationUnit;
+  setupInputValue: string;
   showHistoryPanel: boolean;
   showLogsPanel: boolean;
   intervalPickerOpen: boolean;

@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import { createHash, randomUUID } from 'crypto';
 import { buildCoinValidationSnapshot } from '@features/coin/logic/CoinValidationSnapshot.logic';
 import { mkdir, writeFile } from 'fs/promises';
+import os from 'os';
 import { join } from 'path';
 import type {
   CoinValidationSnapshot,
@@ -79,6 +80,46 @@ function getCacheTtlMs(error: unknown) {
     ? QUOTA_ERROR_CACHE_TTL_MS
     : DEFAULT_CACHE_TTL_MS;
 }
+function formatValidationLogStamp(value: Date) {
+  return value.toISOString().replace(/:/g, '-').replace(/\./g, '-');
+}
+async function createOpenClawValidationLogDir() {
+  const timestamp = new Date();
+  const logId = randomUUID();
+  const logsRoot = join(os.homedir(), '.btcmarketscanner', 'logs', 'openclaw-validation');
+  const logDir = join(logsRoot, `${formatValidationLogStamp(timestamp)}-${logId}`);
+  await mkdir(logDir, { recursive: true });
+  return { logDir, timestamp };
+}
+async function writeOpenClawValidationRequestLog(logDir: string, snapshot: CoinValidationSnapshot, timestamp: Date) {
+  await writeFile(
+    join(logDir, 'request.json'),
+    JSON.stringify({ prompt: openClawPromptInstructions, snapshot, timestamp: timestamp.toISOString() }, null, 2),
+    'utf8',
+  );
+}
+async function writeOpenClawValidationErrorLog(logDir: string, error: unknown) {
+  const errorPayload =
+    error instanceof Error
+      ? { message: error.message, name: error.name, stack: error.stack ?? null }
+      : { message: 'Unknown OpenClaw validation error.', value: error };
+  await writeFile(
+    join(logDir, 'error.json'),
+    JSON.stringify({ error: errorPayload, timestamp: new Date().toISOString() }, null, 2),
+    'utf8',
+  );
+}
+async function writeOpenClawValidationOutcomeLog(
+  logDir: string,
+  response: OpenClawValidationResponse,
+  normalized: FuturesAutoBotOpenClawValidationResult,
+) {
+  await writeFile(
+    join(logDir, 'result.json'),
+    JSON.stringify({ completedAt: new Date().toISOString(), logType: 'validation_result', normalized, response }, null, 2),
+    'utf8',
+  );
+}
 function extractJsonPayload(rawResponse: string) {
   const trimmed = rawResponse.trim();
   if (trimmed.startsWith('```')) {
@@ -107,46 +148,86 @@ function getVolatilityState(price: number | null, atr14: number | null) {
   return 'extreme' as const;
 }
 async function runOpenClawValidation(snapshot: CoinValidationSnapshot) {
-  const child = spawn(
-    'openclaw',
-    [
-      'agent',
-      '--session-id',
-      'main',
-      '--thinking',
-      'low',
-      '--message',
-      `${openClawPromptInstructions}\n\nSnapshot JSON:\n${JSON.stringify(snapshot)}`,
-    ],
-    { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] },
-  );
-  let stderr = '';
-  let stdout = '';
-  const rawOutput = await new Promise<string>((resolve, reject) => {
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.on('error', reject);
-    child.on('close', (code, signal) => {
-      if (code === 0) {
-        const preferredOutput = stdout.trim() || stderr.trim();
-        if (!preferredOutput) {
-          reject(new Error(`openclaw agent returned no output.${stderr ? ` stderr: ${stderr.trim()}` : ''}`));
+  const { logDir, timestamp } = await createOpenClawValidationLogDir();
+  let response: OpenClawValidationResponse | null = null;
+  let normalized: FuturesAutoBotOpenClawValidationResult | null = null;
+
+  await writeOpenClawValidationRequestLog(logDir, snapshot, timestamp);
+
+  try {
+    console.log('[openclaw validation] request', { snapshot });
+
+    const rawOutput = await new Promise<string>((resolve, reject) => {
+      const child = spawn(
+        'openclaw',
+        [
+          'agent',
+          '--session-id',
+          'main',
+          '--thinking',
+          'low',
+          '--message',
+          `${openClawPromptInstructions}\n\nSnapshot JSON:\n${JSON.stringify(snapshot)}`,
+        ],
+        { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      let stderr = '';
+      let stdout = '';
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+      child.on('error', (error) => {
+        reject(error);
+      });
+      child.on('close', (code, signal) => {
+        if (code === 0) {
+          const preferredOutput = stdout.trim() || stderr.trim();
+          if (!preferredOutput) {
+            reject(new Error(`openclaw agent returned no output.${stderr ? ` stderr: ${stderr.trim()}` : ''}`));
+            return;
+          }
+          resolve(preferredOutput);
           return;
         }
-        resolve(preferredOutput);
-        return;
-      }
-      const suffix = signal ? ` signal ${signal}` : '';
-      reject(
-        new Error(`openclaw agent exited with code ${code ?? 'unknown'}${suffix}${stderr ? `: ${stderr.trim()}` : ''}`),
-      );
+        const suffix = signal ? ` signal ${signal}` : '';
+        reject(
+          new Error(
+            `openclaw agent exited with code ${code ?? 'unknown'}${suffix}${stderr ? `: ${stderr.trim()}` : ''}`,
+          ),
+        );
+      });
     });
-  });
-  return rawOutput;
+
+    response = parseOpenClawResponse(rawOutput);
+    normalized = parseValidationResult(snapshot, rawOutput);
+
+    console.log('[openclaw validation] result', response);
+    console.log('[openclaw validation] outcome', {
+      confidence: normalized.confidence,
+      logDir,
+      reason: normalized.reason,
+      setupId: normalized.setup_id,
+      validationResult: normalized.validation_result,
+    });
+
+    return rawOutput;
+  } catch (error) {
+    const errorPayload =
+      error instanceof Error
+        ? { message: error.message, name: error.name, stack: error.stack ?? null }
+        : { message: 'Unknown OpenClaw validation error.', value: error };
+
+    console.error('[openclaw validation] outcome', { error: errorPayload, logDir });
+    await writeOpenClawValidationErrorLog(logDir, error).catch(() => undefined);
+    throw error;
+  } finally {
+    if (response && normalized) {
+      await writeOpenClawValidationOutcomeLog(logDir, response, normalized).catch(() => undefined);
+    }
+  }
 }
 function normalizeValidatedSetup(setup: CoinValidationSnapshotSetupCandidate): OpenClawValidatedSetup {
   const entryLow = setup.entry_zone[0] ?? setup.planned_entry ?? 0;
@@ -218,10 +299,103 @@ function parseOpenClawResponse(rawResponse: string): OpenClawValidationResponse 
       parsed.next_action !== 'wait_for_new_data' &&
       parsed.next_action !== 'flip_direction' &&
       parsed.next_action !== 'ready_to_enter') ||
+    (parsed.suggested_setup !== null &&
+      (typeof parsed.suggested_setup !== 'object' ||
+        parsed.suggested_setup === null ||
+        (parsed.suggested_setup.direction !== 'long' && parsed.suggested_setup.direction !== 'short'))) ||
     !('validated_setup' in parsed)
-  )
+  ) {
     throw new Error('OpenClaw returned an invalid validation payload.');
-  return parsed as OpenClawValidationResponse;
+  }
+
+  if (parsed.decision === 'accept') {
+    if (!parsed.accepted) {
+      throw new Error('OpenClaw accepted decision must set accepted=true.');
+    }
+    if (parsed.validated_setup === null || typeof parsed.validated_setup !== 'object') {
+      throw new Error('OpenClaw accepted the setup without a validated_setup payload.');
+    }
+    const validatedSetup = parsed.validated_setup;
+    if (
+      (validatedSetup.direction !== 'long' && validatedSetup.direction !== 'short') ||
+      !Array.isArray(validatedSetup.entry_zone) ||
+      validatedSetup.entry_zone.length !== 2 ||
+      !Number.isFinite(Number(validatedSetup.entry_zone[0])) ||
+      !Number.isFinite(Number(validatedSetup.entry_zone[1])) ||
+      !Number.isFinite(Number(validatedSetup.planned_entry)) ||
+      !Number.isFinite(Number(validatedSetup.stop_loss)) ||
+      !Number.isFinite(Number(validatedSetup.risk_reward?.tp1)) ||
+      !Number.isFinite(Number(validatedSetup.risk_reward?.tp2)) ||
+      !Number.isFinite(Number(validatedSetup.take_profit?.tp1)) ||
+      !Number.isFinite(Number(validatedSetup.take_profit?.tp2))
+    ) {
+      throw new Error('OpenClaw returned non-finite validation values.');
+    }
+  }
+
+  if (parsed.decision === 'reject' && parsed.accepted) {
+    throw new Error('OpenClaw rejected decision must set accepted=false.');
+  }
+
+  if (parsed.decision === 'reject' && parsed.validated_setup !== null) {
+    throw new Error('OpenClaw returned a rejected payload with a non-null validated_setup.');
+  }
+
+  return {
+    accepted: parsed.accepted,
+    adjustment_notes: parsed.adjustment_notes,
+    confidence: parsed.confidence,
+    decision: parsed.decision,
+    exchange: parsed.exchange,
+    is_perpetual: parsed.is_perpetual,
+    market_type: parsed.market_type,
+    next_action: parsed.next_action,
+    rejection_reasons: parsed.rejection_reasons,
+    setup_id: parsed.setup_id,
+    symbol: parsed.symbol,
+    suggested_setup:
+      parsed.suggested_setup && parsed.decision === 'reject'
+        ? ({
+            direction: parsed.suggested_setup.direction,
+            entry_zone: [
+              Number(parsed.suggested_setup.entry_zone[0]),
+              Number(parsed.suggested_setup.entry_zone[1]),
+            ] as [number, number],
+            planned_entry: Number(parsed.suggested_setup.planned_entry),
+            risk_reward: {
+              tp1: Number(parsed.suggested_setup.risk_reward.tp1),
+              tp2: Number(parsed.suggested_setup.risk_reward.tp2),
+            },
+            setup_type: parsed.suggested_setup.setup_type,
+            stop_loss: Number(parsed.suggested_setup.stop_loss),
+            take_profit: {
+              tp1: Number(parsed.suggested_setup.take_profit.tp1),
+              tp2: Number(parsed.suggested_setup.take_profit.tp2),
+            },
+          } satisfies OpenClawValidatedSetup)
+        : null,
+    validated_setup:
+      parsed.decision === 'accept'
+        ? ({
+            direction: parsed.validated_setup!.direction,
+            entry_zone: [
+              Number(parsed.validated_setup!.entry_zone[0]),
+              Number(parsed.validated_setup!.entry_zone[1]),
+            ] as [number, number],
+            planned_entry: Number(parsed.validated_setup!.planned_entry),
+            risk_reward: {
+              tp1: Number(parsed.validated_setup!.risk_reward.tp1),
+              tp2: Number(parsed.validated_setup!.risk_reward.tp2),
+            },
+            setup_type: parsed.validated_setup!.setup_type,
+            stop_loss: Number(parsed.validated_setup!.stop_loss),
+            take_profit: {
+              tp1: Number(parsed.validated_setup!.take_profit.tp1),
+              tp2: Number(parsed.validated_setup!.take_profit.tp2),
+            },
+          } satisfies OpenClawValidatedSetup)
+        : null,
+  };
 }
 function parseValidationResult(
   snapshot: CoinValidationSnapshot,
@@ -297,6 +471,43 @@ function toValidationSnapshot(input: FuturesAutoBotOpenClawValidationInput): Coi
       structure: 'Insufficient data',
       volumeRatio: null,
     };
+  const timeframeSupportResistance = input.timeframeSnapshots
+    .filter(
+      (snapshot): snapshot is FuturesAutoConsensusTimeframeSnapshot & { interval: '1m' | '15m' | '1h' | '4h' } =>
+        snapshot.interval === '1m' ||
+        snapshot.interval === '15m' ||
+        snapshot.interval === '1h' ||
+        snapshot.interval === '4h',
+    )
+    .map((snapshot) => ({
+      interval: snapshot.interval,
+      isLoading: false,
+      label: snapshot.interval,
+      atr14: snapshot.trend.atr14,
+      ema20: snapshot.trend.ema20,
+      ema50: snapshot.trend.ema50,
+      ema100: snapshot.trend.ema100,
+      ema200: snapshot.trend.ema200,
+      supportResistance: snapshot.supportResistance
+        ? {
+            averageResistance: snapshot.supportResistance.resistance,
+            averageSupport: snapshot.supportResistance.support,
+            resistance: snapshot.supportResistance.resistance,
+            support: snapshot.supportResistance.support,
+          }
+        : null,
+      rsi14: snapshot.trend.rsi14,
+      trendDirection: snapshot.trend.direction,
+      trendLabel: snapshot.trend.label,
+    }));
+
+  const timeframeSources = {
+    '1m': input.timeframeSnapshots.find((item) => item.interval === '1m')?.candles ?? [],
+    '15m': input.timeframeSnapshots.find((item) => item.interval === '15m')?.candles ?? [],
+    '1h': input.timeframeSnapshots.find((item) => item.interval === '1h')?.candles ?? [],
+    '4h': input.timeframeSnapshots.find((item) => item.interval === '4h')?.candles ?? [],
+  };
+
   const snapshot = buildCoinValidationSnapshot({
     accountSize: input.accountSize,
     consensusSetup: input.consensusSetup,
@@ -306,40 +517,8 @@ function toValidationSnapshot(input: FuturesAutoBotOpenClawValidationInput): Coi
     isPerpetual: input.isPerpetual,
     leverage: input.leverage,
     symbol: input.symbol,
-    timeframeSources: {
-      '1m': input.timeframeSnapshots.find((item) => item.interval === '1m')?.candles ?? [],
-      '15m': input.timeframeSnapshots.find((item) => item.interval === '15m')?.candles ?? [],
-      '1h': input.timeframeSnapshots.find((item) => item.interval === '1h')?.candles ?? [],
-      '4h': input.timeframeSnapshots.find((item) => item.interval === '4h')?.candles ?? [],
-    },
-    timeframeSupportResistance: input.timeframeSnapshots
-      .filter(
-        (snapshot): snapshot is FuturesAutoConsensusTimeframeSnapshot & { interval: '1m' | '15m' | '1h' | '4h' } =>
-          snapshot.interval === '1m' ||
-          snapshot.interval === '15m' ||
-          snapshot.interval === '1h' ||
-          snapshot.interval === '4h',
-      )
-      .map((snapshot) => ({
-        interval: snapshot.interval,
-        label: snapshot.interval,
-        atr14: snapshot.trend.atr14,
-        ema20: snapshot.trend.ema20,
-        ema50: snapshot.trend.ema50,
-        ema100: snapshot.trend.ema100,
-        ema200: snapshot.trend.ema200,
-        supportResistance: snapshot.supportResistance
-          ? {
-              averageResistance: snapshot.supportResistance.resistance,
-              averageSupport: snapshot.supportResistance.support,
-              resistance: snapshot.supportResistance.resistance,
-              support: snapshot.supportResistance.support,
-            }
-          : null,
-        rsi14: snapshot.trend.rsi14,
-        trendDirection: snapshot.trend.direction,
-        trendLabel: snapshot.trend.label,
-      })),
+    timeframeSources,
+    timeframeSupportResistance,
   });
 
   if (!snapshot) {
@@ -453,9 +632,23 @@ export class FuturesAutoValidationService {
     const snapshot = toValidationSnapshot(input);
     const cacheKey = getValidationCacheKey(snapshot);
     const cachedResult = options?.bypassCache ? null : readCachedValidation(cacheKey);
-    if (cachedResult) return cachedResult;
+    if (cachedResult) {
+      console.log('[openclaw validation] cache hit', {
+        confidence: cachedResult.confidence,
+        reason: cachedResult.reason,
+        setupId: cachedResult.setup_id,
+        validationResult: cachedResult.validation_result,
+      });
+      return cachedResult;
+    }
     const pendingRequest = options?.bypassCache ? null : pendingValidationRequests.get(cacheKey);
-    if (pendingRequest) return pendingRequest;
+    if (pendingRequest) {
+      console.log('[openclaw validation] pending hit', {
+        setupId: snapshot.setup_id,
+        symbol: snapshot.symbol,
+      });
+      return pendingRequest;
+    }
     const validationPromise = (async () => {
       try {
         const rawResponse = await runOpenClawValidation(snapshot);

@@ -1,10 +1,38 @@
 import { createHmac, randomUUID } from 'crypto';
-import { BASE_API_BINANCE, BINANCE_API_KEY, BINANCE_SECRET_KEY } from '@configs/base.config';
+import {
+  BASE_API_BINANCE,
+  BINANCE_API_KEY,
+  BINANCE_SECRET_KEY,
+} from '@configs/base.config';
 import { getBinanceFuturesBaseUrl } from '@configs/binance-futures-url';
 import { FuturesMarketController } from '../../market/domain/futuresMarket.controller';
 import type { FuturesAutoBotPlan } from '../domain/futuresAutoBot.model';
 // trimmed to keep compile-safe; same runtime behavior as web module for the methods used by the bot service
+type FuturesAccountBalanceResponseItem = {
+  accountAlias?: string;
+  asset?: string;
+  availableBalance?: string;
+  balance?: string;
+  crossUnPnl?: string;
+  crossWalletBalance?: string;
+  marginAvailable?: boolean;
+  maxWithdrawAmount?: string;
+  updateTime?: number;
+};
 type FuturesAccountResponse = { availableBalance?: string; dualSidePosition?: boolean; totalWalletBalance?: string };
+type FuturesAccountInfoResponse = {
+  assets?: Array<{
+    asset?: string;
+    availableBalance?: string;
+    walletBalance?: string;
+    marginBalance?: string;
+    crossWalletBalance?: string;
+  }>;
+  availableBalance?: string;
+  totalWalletBalance?: string;
+  totalMarginBalance?: string;
+  dualSidePosition?: boolean;
+};
 type FuturesLeverageResponse = { leverage?: number; maxNotionalValue?: string; symbol?: string };
 type FuturesPositionRiskResponseItem = {
   entryPrice?: string;
@@ -74,11 +102,6 @@ const futuresMarketController = new FuturesMarketController();
 function buildBaseUrl() {
   return getBinanceFuturesBaseUrl(BASE_API_BINANCE());
 }
-function signQueryString(queryString: string) {
-  return createHmac('sha256', BINANCE_SECRET_KEY() ?? '')
-    .update(queryString)
-    .digest('hex');
-}
 function roundDownToStep(value: number, step: number) {
   if (!Number.isFinite(value) || !Number.isFinite(step) || step <= 0) return value;
   const precision = Math.max(0, (step.toString().split('.')[1]?.length ?? 0) + 2);
@@ -93,6 +116,30 @@ function parseNumber(value?: string | null) {
   if (!value) return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+function toAccountSummary(balanceItems: FuturesAccountBalanceResponseItem[]) {
+  const usdtBalance = balanceItems.find((item) => item.asset === 'USDT') ?? balanceItems[0];
+  if (!usdtBalance) return null;
+  return {
+    availableBalance: usdtBalance.availableBalance ?? usdtBalance.balance,
+    totalWalletBalance: usdtBalance.balance,
+    totalMarginBalance: usdtBalance.crossWalletBalance,
+  };
+}
+function toAccountSummaryFromAccountInfo(accountInfo: FuturesAccountInfoResponse | null | undefined) {
+  if (!accountInfo) return null;
+
+  const usdtAsset = accountInfo.assets?.find((item) => item.asset === 'USDT') ?? accountInfo.assets?.[0];
+  if (!usdtAsset && !accountInfo.availableBalance && !accountInfo.totalWalletBalance) {
+    return null;
+  }
+
+  return {
+    availableBalance: usdtAsset?.availableBalance ?? accountInfo.availableBalance,
+    totalWalletBalance: usdtAsset?.walletBalance ?? accountInfo.totalWalletBalance,
+    totalMarginBalance: usdtAsset?.marginBalance ?? usdtAsset?.crossWalletBalance ?? accountInfo.totalMarginBalance,
+    dualSidePosition: accountInfo.dualSidePosition,
+  };
 }
 function pickSymbolRule(symbolInfo: FuturesSymbolInfo | undefined, filterType: string) {
   return symbolInfo?.filters?.find((item) => item.filterType === filterType) ?? null;
@@ -144,6 +191,36 @@ function shortBinanceError(message: string, limit = 160) {
   return compact.length > limit ? `${compact.slice(0, limit - 1)}…` : compact;
 }
 export class FuturesAutoTradeService {
+  private async createListenKey() {
+    if (!BINANCE_API_KEY()) {
+      throw new Error('Binance API key is missing.');
+    }
+
+    const response = await fetch(`${buildBaseUrl().replace(/\/fapi\/v1$/, '')}/fapi/v1/listenKey`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-MBX-APIKEY': BINANCE_API_KEY() ?? '',
+        Accept: 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Binance ${response.status}: ${shortBinanceError(await response.text())}`);
+    }
+
+    const payload = (await response.json()) as { listenKey?: string };
+    if (!payload.listenKey) {
+      throw new Error('Binance listenKey is missing.');
+    }
+
+    return payload.listenKey;
+  }
+
+  getListenKey() {
+    return this.createListenKey();
+  }
+
   private async request<T>(
     path: string,
     options: {
@@ -152,37 +229,62 @@ export class FuturesAutoTradeService {
       signed?: boolean;
     } = {},
   ) {
-    if (!BINANCE_API_KEY() || !BINANCE_SECRET_KEY()) throw new Error('Binance credentials are missing.');
     const { method = 'GET', params = {}, signed = false } = options;
+    const apiKey = BINANCE_API_KEY();
+    const secretKey = BINANCE_SECRET_KEY();
+    if (!apiKey || !secretKey) {
+      throw new Error('Binance credentials are missing.');
+    }
+
     const url = new URL(path, buildBaseUrl());
     const searchParams = new URLSearchParams();
     Object.entries(params).forEach(([key, value]) => {
       if (value === undefined || value === null) return;
       searchParams.set(key, String(value));
     });
+
+    const requestUrl = new URL(url.toString());
     if (signed) {
-      searchParams.set('recvWindow', '5000');
-      searchParams.set('timestamp', String(Date.now()));
-      searchParams.set('signature', signQueryString(searchParams.toString()));
+      const requestParams = new URLSearchParams(searchParams.toString());
+      requestParams.set('recvWindow', '5000');
+      requestParams.set('timestamp', String(Date.now()));
+      requestParams.set('signature', createHmac('sha256', secretKey).update(requestParams.toString()).digest('hex'));
+      requestUrl.search = requestParams.toString();
     }
-    url.search = searchParams.toString();
-    const response = await fetch(url.toString(), {
+    else {
+      requestUrl.search = searchParams.toString();
+    }
+
+    const response = await fetch(requestUrl.toString(), {
       method,
       headers: {
         'Content-Type': 'application/json',
-        'X-MBX-APIKEY': BINANCE_API_KEY(),
+        'X-MBX-APIKEY': apiKey,
         'User-Agent': 'binance-algo/1.1.0 (Skill)',
         Accept: 'application/json',
       },
     });
+
     if (!response.ok) {
       const errorText = shortBinanceError(await response.text());
       throw new Error(`Binance ${response.status}${errorText ? `: ${errorText}` : ''}`);
     }
+
     return (await response.json()) as T;
   }
   getAccount() {
-    return this.request<FuturesAccountResponse>('/fapi/v2/account', { signed: true });
+    return this.request<FuturesAccountBalanceResponseItem[]>('/fapi/v3/balance', { signed: true })
+      .then((balances) => {
+        const account = toAccountSummary(balances);
+        if (!account) throw new Error('Binance account balance is empty.');
+        return account as FuturesAccountResponse;
+      })
+      .catch(async () => {
+        const accountInfo = await this.request<FuturesAccountInfoResponse>('/fapi/v2/account', { signed: true });
+        const account = toAccountSummaryFromAccountInfo(accountInfo);
+        if (!account) throw new Error('Binance account data is empty.');
+        return account as FuturesAccountResponse;
+      });
   }
   getOpenPositions(symbol?: string) {
     return this.request<FuturesPositionRiskResponseItem[]>('/fapi/v2/positionRisk', {

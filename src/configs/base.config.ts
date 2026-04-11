@@ -23,7 +23,11 @@ export function APP_VERSION() {
 }
 
 export function BASE_API_BINANCE() {
-  return process.env.BASE_API_BINANCE ?? 'https://fapi.binance.com/fapi/v1';
+  if (process.env.BASE_API_BINANCE?.trim()) {
+    return process.env.BASE_API_BINANCE;
+  }
+
+  return isDevelopmentMode() ? 'https://demo-fapi.binance.com/fapi/v1' : 'https://fapi.binance.com/fapi/v1';
 }
 
 export function BASE_API_WEBSOCKET_BINANCE() {
@@ -31,13 +35,19 @@ export function BASE_API_WEBSOCKET_BINANCE() {
 }
 
 export function BINANCE_API_KEY() {
-  const envValue = isDevelopmentMode() ? process.env.BINANCE_API_KEY?.trim() : '';
-  return envValue || runtimeConfig.auth.profiles.binance.api_key;
+  if (isDevelopmentMode()) {
+    return process.env.BINANCE_API_KEY?.trim() ?? '';
+  }
+
+  return runtimeConfig.auth.profiles.binance.api_key;
 }
 
 export function BINANCE_SECRET_KEY() {
-  const envValue = isDevelopmentMode() ? process.env.BINANCE_SECRET_KEY?.trim() : '';
-  return envValue || runtimeConfig.auth.profiles.binance.secret_key;
+  if (isDevelopmentMode()) {
+    return process.env.BINANCE_SECRET_KEY?.trim() ?? '';
+  }
+
+  return runtimeConfig.auth.profiles.binance.secret_key;
 }
 
 export function HAS_BINANCE_CREDENTIALS() {
@@ -49,7 +59,7 @@ export function getBinanceCredentialSource() {
     return 'env';
   }
 
-  if (runtimeConfig.auth.profiles.binance.api_key.trim() && runtimeConfig.auth.profiles.binance.secret_key.trim()) {
+  if (!isDevelopmentMode() && runtimeConfig.auth.profiles.binance.api_key.trim() && runtimeConfig.auth.profiles.binance.secret_key.trim()) {
     return 'json';
   }
 

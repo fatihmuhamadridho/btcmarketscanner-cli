@@ -80,7 +80,7 @@ export class FuturesAutoConsensusService {
           volume: candle.volume,
           closeTime: candle.closeTime,
         }));
-        const supportResistance = buildSupportResistance(candles, 20);
+        const supportResistance = buildSupportResistance(candles, Math.min(50, candles.length));
         const trend = analyzeTrend(candles, supportResistance);
         const longSetup = analyzeSetupSide('long', candles, trend, supportResistance);
         const shortSetup = analyzeSetupSide('short', candles, trend, supportResistance);

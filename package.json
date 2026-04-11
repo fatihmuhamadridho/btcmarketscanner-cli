@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "node ./scripts/build.mjs",
-    "dev": "NODE_ENV=development tsx --import ./src/env.ts src/index.tsx",
+    "dev": "NODE_ENV=development node ./scripts/dev.mjs",
     "format": "prettier --write \"src/**/*.{ts,tsx,json,md,cjs,mjs}\" \"*.{json,md}\"",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,json,md,cjs,mjs}\" \"*.{json,md}\"",
     "start": "NODE_ENV=production node dist/index.js",
@@ -24,7 +24,7 @@
   "packageManager": "pnpm@10.33.0",
   "dependencies": {
     "axios": "^1.15.0",
-    "btcmarketscanner-core": "github:fatihmuhamadridho/btcmarketscanner-core#master",
+    "btcmarketscanner-core": "workspace:*",
     "dotenv": "^17.4.1",
     "ink": "^6.8.0",
     "react": "^19.2.4"

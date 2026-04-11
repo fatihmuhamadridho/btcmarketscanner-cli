@@ -1,9 +1,4 @@
-import type {
-  CommandResult,
-  TerminalMode,
-  TerminalSetupLeverageOption,
-  TerminalState,
-} from '@interfaces/terminal.interface';
+import type { TerminalAllocationUnit, CommandResult, TerminalMode, TerminalSetupLeverageOption, TerminalState } from '@interfaces/terminal.interface';
 
 function normalizeSymbol(raw: string) {
   return raw.trim().toUpperCase();
@@ -30,7 +25,21 @@ export const SETUP_LEVERAGE_OPTIONS: Array<{
 
 export const SETUP_MENU_OPTIONS = [
   { key: 'leverage', label: 'Leverage', description: 'choose a leverage preset' },
+  { key: 'allocation', label: 'Entry Allocation', description: 'choose percentage or fixed amount' },
 ] as const;
+
+export const SETUP_ALLOCATION_UNIT_OPTIONS: Array<{
+  unit: TerminalAllocationUnit;
+  label: string;
+  description: string;
+}> = [
+  { unit: 'percent', label: 'Percentage', description: 'use a percent of wallet balance' },
+  { unit: 'usdt', label: 'Amount', description: 'use a fixed USDT margin amount' },
+];
+
+function formatAllocationLabel(unit: TerminalAllocationUnit, value: number) {
+  return unit === 'usdt' ? `${value} USDT` : `${value}%`;
+}
 
 export function getDefaultTerminalState(): TerminalState {
   return {
@@ -47,10 +56,16 @@ export function getDefaultTerminalState(): TerminalState {
     },
     mode: '1h',
     leverage: 5,
+    allocationUnit: 'percent',
+    allocationValue: 10,
     setupMenuOpen: false,
     setupMenuSelectedIndex: 0,
     setupPickerOpen: false,
     setupPickerSelectedIndex: 0,
+    setupPickerMode: 'leverage',
+    setupInputOpen: false,
+    setupInputUnit: 'usdt',
+    setupInputValue: '',
     showHistoryPanel: true,
     showLogsPanel: false,
     intervalPickerOpen: false,
@@ -85,7 +100,7 @@ export function formatAvailableCommands() {
     },
     { command: '/interval', example: '1m|5m|15m|1h|4h', description: 'change the active market interval preset' },
     { command: '/history', example: 'on|off|toggle', description: 'show or hide the command history panel' },
-    { command: '/setup', example: '10', description: 'open the leverage picker or set leverage directly' },
+    { command: '/setup', example: '', description: 'open leverage and entry allocation setup' },
     { command: '/logs', example: '', description: 'toggle the bot logs panel for the active symbol' },
     { command: '/bot', example: 'start|stop|toggle', description: 'control the local futures bot state' },
     { command: '/exit', example: '', description: 'exit the terminal app' },
@@ -249,34 +264,10 @@ export function applyTerminalCommand(input: string, current: TerminalState): Com
       };
     }
 
-    if (normalizedArg.toLowerCase() === 'leverage') {
-      return {
-        state: {
-          setupPickerOpen: true,
-          setupPickerSelectedIndex: SETUP_LEVERAGE_OPTIONS.findIndex((option) => option.leverage === current.leverage),
-          showHelp: false,
-        },
-        kind: 'system',
-        message: 'Leverage picker opened. Use arrows and Enter.',
-      };
-    }
-
-    const leverage = Number(normalizedArg);
-    if (!Number.isFinite(leverage) || leverage <= 0) {
-      return {
-        state: {},
-        kind: 'error',
-        message: 'Usage: /setup 10',
-      };
-    }
-
     return {
-      state: {
-        leverage: Math.max(1, Math.trunc(leverage)),
-        showHelp: false,
-      },
-      kind: 'system',
-      message: `Leverage set to ${Math.max(1, Math.trunc(leverage))}x.`,
+      state: {},
+      kind: 'error',
+      message: `Usage: /setup. Current allocation ${formatAllocationLabel(current.allocationUnit, current.allocationValue)}.`,
     };
   }
 

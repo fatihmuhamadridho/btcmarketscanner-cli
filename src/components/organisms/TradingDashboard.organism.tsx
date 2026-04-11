@@ -99,6 +99,8 @@ export function TradingDashboard({
   liveState,
   view,
   panelWidth,
+  leverage,
+  allocationLabel,
 }: {
   snapshot: MarketSnapshot;
   mode: MarketMode;
@@ -107,6 +109,8 @@ export function TradingDashboard({
   liveState: LiveMarketState;
   view: MarketSnapshotView;
   panelWidth: number;
+  leverage: number;
+  allocationLabel: string;
 }) {
   const marketCandles = liveState.initialCandles.length
     ? liveState.initialCandles
@@ -212,6 +216,38 @@ export function TradingDashboard({
               {line(
                 'bot-state',
                 <Text color={botStateLabel === 'idle' ? '#c9d1d9' : '#8be9fd'}>{botStateLabel}</Text>,
+                14,
+              )}
+              {line('leverage', <Text color="#8be9fd">{`${leverage}x`}</Text>, 14)}
+              {line('allocation', <Text color="#f1fa8c">{allocationLabel}</Text>, 14)}
+              {line(
+                'plan-source',
+                <Text color={liveState.bot?.planSource === 'openclaw' ? '#f1fa8c' : '#8be9fd'}>
+                  {liveState.bot?.planSource ?? 'n/a'}
+                </Text>,
+                14,
+              )}
+              {line(
+                'scan-price',
+                <Text color={numberTone(liveState.bot?.lastScanPrice ?? null)}>
+                  {price(liveState.bot?.lastScanPrice ?? null)}
+                </Text>,
+                14,
+              )}
+              {line(
+                'entry-zone',
+                <>
+                  <Text color="#50fa7b">{price(liveState.bot?.plan.entryZone.low ?? null)}</Text> /{' '}
+                  <Text color="#50fa7b">{price(liveState.bot?.plan.entryZone.high ?? null)}</Text>
+                </>,
+                14,
+              )}
+              {line(
+                'tp1-sl',
+                <>
+                  TP1 <Text color="#f1fa8c">{price(liveState.bot?.plan.takeProfits[0]?.price ?? null)}</Text> SL{' '}
+                  <Text color="#ff6b6b">{price(liveState.bot?.plan.stopLoss ?? null)}</Text>
+                </>,
                 14,
               )}
               {line('open-orders', <Text color="#f1fa8c">{openOrderCount}</Text>, 14)}

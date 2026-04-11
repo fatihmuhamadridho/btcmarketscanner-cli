@@ -20,6 +20,26 @@ export type CoinSetupDetail = {
   takeProfit: number | null;
 };
 
+export type CoinTimeframeSupportResistance = {
+  interval: string;
+  isLoading: boolean;
+  label: string;
+  atr14: number | null;
+  supportResistance: {
+    averageResistance: number;
+    averageSupport: number;
+    resistance: number;
+    support: number;
+  } | null;
+  ema100: number | null;
+  ema20: number | null;
+  ema200: number | null;
+  ema50: number | null;
+  rsi14: number | null;
+  trendDirection: 'bullish' | 'bearish' | 'sideways';
+  trendLabel: string;
+};
+
 export type CoinAutoBotTimeframeSummary = {
   direction: 'long' | 'short';
   atrLabel: string;
