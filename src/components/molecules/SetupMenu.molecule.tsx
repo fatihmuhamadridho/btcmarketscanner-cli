@@ -7,11 +7,13 @@ export function SetupMenu({
   selectedIndex,
   leverage,
   allocationLabel,
+  marginMode,
   width,
 }: {
   selectedIndex: number;
   leverage: number;
   allocationLabel: string;
+  marginMode: 'cross' | 'isolated';
   width?: number;
 }) {
   return (
@@ -20,7 +22,8 @@ export function SetupMenu({
         <Text dimColor>Choose a setup option.</Text>
         {SETUP_MENU_OPTIONS.map((option, index) => {
           const isSelected = index === selectedIndex;
-          const value = option.key === 'leverage' ? `${leverage}x` : allocationLabel;
+          const value =
+            option.key === 'leverage' ? `${leverage}x` : option.key === 'marginMode' ? marginMode : allocationLabel;
           return (
             <Text key={option.key}>
               <Text color={isSelected ? '#8be9fd' : '#7ee7ff'} bold={isSelected}>

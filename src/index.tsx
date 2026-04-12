@@ -24,7 +24,7 @@ import { futuresAutoBotService } from '@core/binance/futures/bot/infrastructure/
 import { futuresAutoTradeService } from '@core/binance/futures/bot/infrastructure/futuresAutoTrade.service';
 import { FuturesExchangeInfoController } from '@core/binance/futures/exchange-info/domain/futuresExchangeInfo.controller';
 import { FuturesMarketController } from '@core/binance/futures/market/domain/futuresMarket.controller';
-import { loadCoinConfig, updateCoinConfigLeverage, updateCoinConfigAllocation } from '@services/coin-config.service';
+import { loadCoinConfig, updateCoinConfigLeverage, updateCoinConfigAllocation, updateCoinConfigMarginMode } from '@services/coin-config.service';
 import { saveLastWatchedSymbol, loadLastWatchedSymbol } from '@services/watch-config.service';
 import { WebsocketService } from '@services/websocket.service';
 import { ensureOnboardedConfig } from '@services/onboarding.service';
@@ -36,6 +36,7 @@ import {
   getDefaultTerminalState,
   SETUP_ALLOCATION_UNIT_OPTIONS,
   SETUP_LEVERAGE_OPTIONS,
+  SETUP_MARGIN_MODE_OPTIONS,
   SETUP_MENU_OPTIONS,
 } from '@lib/command-parser';
 
@@ -488,6 +489,7 @@ function App() {
             leverage: config.leverage,
             allocationUnit: config.allocation.type,
             allocationValue: config.allocation.value,
+            marginMode: config.marginMode ?? 'isolated',
           }));
         }
       })
@@ -507,6 +509,7 @@ function App() {
             leverage: config.leverage,
             allocationUnit: config.allocation.type,
             allocationValue: config.allocation.value,
+            marginMode: config.marginMode ?? 'isolated',
           }));
         }
       })
@@ -567,6 +570,18 @@ function App() {
               SETUP_ALLOCATION_UNIT_OPTIONS.findIndex((option) => option.unit === current.allocationUnit),
             ),
           }));
+        } else if (selectedItem?.key === 'marginMode') {
+          setTerminal((current) => ({
+            ...current,
+            setupMenuOpen: false,
+            setupMenuSelectedIndex: 0,
+            setupPickerOpen: true,
+            setupPickerMode: 'marginMode',
+            setupPickerSelectedIndex: Math.max(
+              0,
+              SETUP_MARGIN_MODE_OPTIONS.findIndex((option) => option.mode === current.marginMode),
+            ),
+          }));
         }
         return;
       }
@@ -589,6 +604,8 @@ function App() {
         const itemCount =
           terminal.setupPickerMode === 'leverage'
             ? SETUP_LEVERAGE_OPTIONS.length
+            : terminal.setupPickerMode === 'marginMode'
+            ? SETUP_MARGIN_MODE_OPTIONS.length
             : SETUP_ALLOCATION_UNIT_OPTIONS.length;
         setTerminal((current) => ({
           ...current,
@@ -618,6 +635,22 @@ function App() {
           // Save leverage to coin config
           updateCoinConfigLeverage(terminal.activeSymbol, selectedItem.leverage).catch((error) => {
             console.error(`[setup] Failed to save leverage for ${terminal.activeSymbol}:`, error);
+          });
+        } else if (terminal.setupPickerMode === 'marginMode') {
+          const selectedItem =
+            SETUP_MARGIN_MODE_OPTIONS[terminal.setupPickerSelectedIndex] ?? SETUP_MARGIN_MODE_OPTIONS[0];
+          setTerminal((current) => ({
+            ...current,
+            marginMode: selectedItem.mode,
+            setupPickerOpen: false,
+            setupPickerMode: 'marginMode',
+            setupPickerSelectedIndex: SETUP_MARGIN_MODE_OPTIONS.findIndex(
+              (option) => option.mode === selectedItem.mode,
+            ),
+          }));
+          // Save margin mode to coin config
+          updateCoinConfigMarginMode(terminal.activeSymbol, selectedItem.mode).catch((error) => {
+            console.error(`[setup] Failed to save margin mode for ${terminal.activeSymbol}:`, error);
           });
         } else {
           const selectedItem =
@@ -915,6 +948,12 @@ function App() {
       if (result.botAction === 'revalidate') {
         futuresAutoBotService.revalidate(terminal.activeSymbol).catch((error) => {
           console.error(`[terminal] Failed to revalidate for ${terminal.activeSymbol}:`, error);
+        });
+      }
+
+      if (result.botAction === 'optimize') {
+        futuresAutoBotService.optimizeExistingPosition(terminal.activeSymbol).catch((error) => {
+          console.error(`[terminal] Failed to optimize position for ${terminal.activeSymbol}:`, error);
         });
       }
 
@@ -1516,6 +1555,7 @@ function App() {
             selectedIndex={Math.min(terminal.setupMenuSelectedIndex, Math.max(0, SETUP_MENU_OPTIONS.length - 1))}
             leverage={terminal.leverage}
             allocationLabel={formatAllocationLabel(terminal.allocationUnit, terminal.allocationValue)}
+            marginMode={terminal.marginMode}
             width={panelWidth}
           />
         ) : null}
@@ -1528,6 +1568,8 @@ function App() {
                 0,
                 (terminal.setupPickerMode === 'leverage'
                   ? SETUP_LEVERAGE_OPTIONS.length
+                  : terminal.setupPickerMode === 'marginMode'
+                  ? SETUP_MARGIN_MODE_OPTIONS.length
                   : SETUP_ALLOCATION_UNIT_OPTIONS.length) - 1,
               ),
             )}

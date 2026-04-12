@@ -32,6 +32,7 @@ export const SETUP_LEVERAGE_OPTIONS: Array<{
 export const SETUP_MENU_OPTIONS = [
   { key: 'leverage', label: 'Leverage', description: 'choose a leverage preset' },
   { key: 'allocation', label: 'Entry Allocation', description: 'choose percentage or fixed amount' },
+  { key: 'marginMode', label: 'Margin Mode', description: 'choose cross or isolated margin' },
 ] as const;
 
 export const SETUP_ALLOCATION_UNIT_OPTIONS: Array<{
@@ -41,6 +42,15 @@ export const SETUP_ALLOCATION_UNIT_OPTIONS: Array<{
 }> = [
   { unit: 'percent', label: 'Percentage', description: 'use a percent of wallet balance' },
   { unit: 'usdt', label: 'Amount', description: 'use a fixed USDT margin amount' },
+];
+
+export const SETUP_MARGIN_MODE_OPTIONS: Array<{
+  mode: 'cross' | 'isolated';
+  label: string;
+  description: string;
+}> = [
+  { mode: 'isolated', label: 'Isolated', description: 'isolated margin mode (default, safer)' },
+  { mode: 'cross', label: 'Cross', description: 'cross margin mode (higher risk)' },
 ];
 
 function formatAllocationLabel(unit: TerminalAllocationUnit, value: number) {
@@ -65,6 +75,7 @@ export function getDefaultTerminalState(): TerminalState {
     leverage: 5,
     allocationUnit: 'percent',
     allocationValue: 10,
+    marginMode: 'isolated',
     setupMenuOpen: false,
     setupMenuSelectedIndex: 0,
     setupPickerOpen: false,
@@ -125,6 +136,11 @@ export function formatAvailableCommands() {
       command: '/revalidate',
       example: '',
       description: 'manually request OpenClaw revalidation for the current setup',
+    },
+    {
+      command: '/optimize',
+      example: '',
+      description: 'ask OpenClaw to optimize TP/SL for your existing open position',
     },
     { command: '/exit', example: '', description: 'exit the terminal app' },
     { command: '/help', example: '', description: 'show the available slash commands and their usage' },
@@ -499,6 +515,16 @@ export function applyTerminalCommand(input: string, current: TerminalState): Com
       kind: 'system',
       message: 'Revalidation requested. Bot will re-evaluate current setup with OpenClaw.',
       botAction: 'revalidate',
+      refresh: true,
+    };
+  }
+
+  if (lowerCommand === 'optimize') {
+    return {
+      state: { showHelp: false },
+      kind: 'system',
+      message: 'Optimization requested. Bot will ask OpenClaw to optimize TP/SL for your existing position.',
+      botAction: 'optimize',
       refresh: true,
     };
   }

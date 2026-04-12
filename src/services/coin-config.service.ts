@@ -22,6 +22,7 @@ export type CoinConfig = {
   symbol: string;
   allocation: CoinConfigAllocation;
   leverage: number;
+  marginMode: 'cross' | 'isolated';
   lastValidatedPlan?: CoinConfigLastValidatedPlan | null;
   lastValidatedAt?: string | null;
   updatedAt: string;
@@ -76,6 +77,7 @@ export async function updateCoinConfigAllocation(
     symbol,
     allocation,
     leverage: existing?.leverage ?? 10,
+    marginMode: existing?.marginMode ?? 'isolated',
     lastValidatedPlan: existing?.lastValidatedPlan ?? null,
     lastValidatedAt: existing?.lastValidatedAt ?? null,
     updatedAt: new Date().toISOString(),
@@ -90,6 +92,7 @@ export async function updateCoinConfigLeverage(symbol: string, leverage: number)
     symbol,
     allocation: existing?.allocation ?? { type: 'percent', value: 5 },
     leverage,
+    marginMode: existing?.marginMode ?? 'isolated',
     lastValidatedPlan: existing?.lastValidatedPlan ?? null,
     lastValidatedAt: existing?.lastValidatedAt ?? null,
     updatedAt: new Date().toISOString(),
@@ -107,6 +110,7 @@ export async function updateCoinConfigLastValidatedPlan(
     symbol,
     allocation: existing?.allocation ?? { type: 'percent', value: 5 },
     leverage: existing?.leverage ?? 10,
+    marginMode: existing?.marginMode ?? 'isolated',
     lastValidatedPlan: plan,
     lastValidatedAt: plan ? new Date().toISOString() : null,
     updatedAt: new Date().toISOString(),
@@ -125,6 +129,7 @@ export async function getOrCreateDefaultCoinConfig(symbol: string): Promise<Coin
     symbol,
     allocation: { type: 'percent', value: 5 },
     leverage: 10,
+    marginMode: 'isolated',
     lastValidatedPlan: null,
     lastValidatedAt: null,
     updatedAt: new Date().toISOString(),
@@ -132,4 +137,22 @@ export async function getOrCreateDefaultCoinConfig(symbol: string): Promise<Coin
 
   await saveCoinConfig(defaultConfig);
   return defaultConfig;
+}
+
+export async function updateCoinConfigMarginMode(
+  symbol: string,
+  marginMode: 'cross' | 'isolated',
+): Promise<CoinConfig> {
+  const existing = await loadCoinConfig(symbol);
+  const updated: CoinConfig = {
+    symbol,
+    allocation: existing?.allocation ?? { type: 'percent', value: 5 },
+    leverage: existing?.leverage ?? 10,
+    marginMode,
+    lastValidatedPlan: existing?.lastValidatedPlan ?? null,
+    lastValidatedAt: existing?.lastValidatedAt ?? null,
+    updatedAt: new Date().toISOString(),
+  };
+  await saveCoinConfig(updated);
+  return updated;
 }

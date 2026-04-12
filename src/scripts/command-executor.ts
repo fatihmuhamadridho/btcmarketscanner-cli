@@ -66,6 +66,24 @@ async function handleBotCommand(command: BotCommand, symbol: string, args: strin
       console.log(`✅ Bot started for ${symbol}`);
       console.log(`Status: ${state.status}`);
       console.log(`Plan: ${state.plan.entryMid} (TP1: ${state.plan.takeProfits[0]?.price})`);
+
+      // Start continuous scanning to detect fills and place TP/SL
+      console.log(`🔄 Starting continuous scan loop every 5 seconds...`);
+      const scanInterval = setInterval(async () => {
+        try {
+          await futuresAutoBotService.recordProgress(symbol);
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+          console.error(`[scan-error] ${errorMsg}`);
+        }
+      }, 5000);
+
+      // Graceful shutdown
+      process.on('SIGINT', () => {
+        clearInterval(scanInterval);
+        console.log('\n⏹️  Bot stopped');
+        process.exit(0);
+      });
       break;
     }
 
