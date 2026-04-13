@@ -24,7 +24,12 @@ import { futuresAutoBotService } from '@core/binance/futures/bot/infrastructure/
 import { futuresAutoTradeService } from '@core/binance/futures/bot/infrastructure/futuresAutoTrade.service';
 import { FuturesExchangeInfoController } from '@core/binance/futures/exchange-info/domain/futuresExchangeInfo.controller';
 import { FuturesMarketController } from '@core/binance/futures/market/domain/futuresMarket.controller';
-import { loadCoinConfig, updateCoinConfigLeverage, updateCoinConfigAllocation, updateCoinConfigMarginMode } from '@services/coin-config.service';
+import {
+  loadCoinConfig,
+  updateCoinConfigLeverage,
+  updateCoinConfigAllocation,
+  updateCoinConfigMarginMode,
+} from '@services/coin-config.service';
 import { saveLastWatchedSymbol, loadLastWatchedSymbol } from '@services/watch-config.service';
 import { WebsocketService } from '@services/websocket.service';
 import { ensureOnboardedConfig } from '@services/onboarding.service';
@@ -90,11 +95,19 @@ function buildMarketSnapshotFromLive(terminal: TerminalState, live: LiveMarketSt
   const setupSide = trend.direction === 'bullish' ? 'long' : 'short';
   const setup = analyzeSetupSide(setupSide, candles, trend, supportResistance);
 
+  // Map terminal mode (timeframe) to market mode (trading style)
+  const marketMode =
+    terminal.mode === '1m' || terminal.mode === '5m'
+      ? 'scalp'
+      : terminal.mode === '15m' || terminal.mode === '1h'
+        ? 'swing'
+        : 'position';
+
   return {
     candles,
     pair: terminal.activeSymbol,
     interval: terminal.mode,
-    mode: terminal.mode,
+    mode: marketMode,
     supportResistance,
     strongSupportResistance,
     trend,
@@ -605,8 +618,8 @@ function App() {
           terminal.setupPickerMode === 'leverage'
             ? SETUP_LEVERAGE_OPTIONS.length
             : terminal.setupPickerMode === 'marginMode'
-            ? SETUP_MARGIN_MODE_OPTIONS.length
-            : SETUP_ALLOCATION_UNIT_OPTIONS.length;
+              ? SETUP_MARGIN_MODE_OPTIONS.length
+              : SETUP_ALLOCATION_UNIT_OPTIONS.length;
         setTerminal((current) => ({
           ...current,
           setupPickerSelectedIndex: key.upArrow
@@ -694,7 +707,7 @@ function App() {
               ...current.history,
               {
                 input: '/setup',
-                kind: 'error',
+                kind: 'error' as const,
                 message: `Invalid ${current.setupInputUnit === 'usdt' ? 'amount' : 'percentage'} value.`,
               },
             ].slice(-100),
@@ -713,7 +726,7 @@ function App() {
             ...current.history,
             {
               input: '/setup',
-              kind: 'system',
+              kind: 'system' as const,
               message:
                 current.setupInputUnit === 'usdt'
                   ? `Entry balance set to ${allocationValue} USDT.`
@@ -913,7 +926,7 @@ function App() {
             ...current.history,
             {
               input: commandToRun,
-              kind: result.kind ?? 'system',
+              kind: (result.kind ?? 'system') as 'command' | 'system' | 'error' | 'success',
               message: result.message,
             },
           ].slice(-100), // Keep only last 100 history items to prevent memory leak
@@ -1130,9 +1143,9 @@ function App() {
       if (cancelled) return;
 
       const currentSocket = futuresPriceWebsocketService.instance;
-      const isConnected = currentSocket && currentSocket.readyState === WebSocket.OPEN;
+      const isConnected = !!(currentSocket && currentSocket.readyState === WebSocket.OPEN);
 
-      setLiveState((current) => {
+      setLiveState((current): LiveMarketState => {
         if (current.websocketConnected !== isConnected) {
           console.log(`[websocket-state] Connection state changed: ${isConnected ? 'OPEN' : 'CLOSED'}`);
           return {
@@ -1268,7 +1281,7 @@ function App() {
             ? {
                 displayName: getBinanceProfileLabel(),
                 availableBalance: parseBalance(account.availableBalance ?? null),
-                totalMarginBalance: parseBalance(account.totalMarginBalance ?? null),
+                totalMarginBalance: parseBalance(account.totalWalletBalance ?? null),
                 walletBalance: parseBalance(account.totalWalletBalance ?? null),
                 subtitle:
                   account.availableBalance || account.totalWalletBalance
@@ -1297,7 +1310,7 @@ function App() {
             ? {
                 displayName: getBinanceProfileLabel(),
                 availableBalance: parseBalance(account.availableBalance ?? null),
-                totalMarginBalance: parseBalance(account.totalMarginBalance ?? null),
+                totalMarginBalance: parseBalance(account.totalWalletBalance ?? null),
                 walletBalance: parseBalance(account.totalWalletBalance ?? null),
                 subtitle:
                   account.availableBalance || account.totalWalletBalance
@@ -1489,7 +1502,11 @@ function App() {
           <BotLogs
             items={(liveState.botLogs ?? []).map((log) => ({
               input: '',
-              kind: log.level === 'error' ? 'error' : log.level === 'warn' ? 'system' : 'command',
+              kind: (log.level === 'error' ? 'error' : log.level === 'warn' ? 'system' : 'command') as
+                | 'command'
+                | 'system'
+                | 'error'
+                | 'success',
               message: log.message,
             }))}
             width={panelWidth}
@@ -1569,8 +1586,8 @@ function App() {
                 (terminal.setupPickerMode === 'leverage'
                   ? SETUP_LEVERAGE_OPTIONS.length
                   : terminal.setupPickerMode === 'marginMode'
-                  ? SETUP_MARGIN_MODE_OPTIONS.length
-                  : SETUP_ALLOCATION_UNIT_OPTIONS.length) - 1,
+                    ? SETUP_MARGIN_MODE_OPTIONS.length
+                    : SETUP_ALLOCATION_UNIT_OPTIONS.length) - 1,
               ),
             )}
             width={panelWidth}
@@ -1595,7 +1612,13 @@ function App() {
       {liveState.error ? null : snapshot ? (
         <TradingDashboard
           snapshot={snapshot}
-          mode={terminal.mode}
+          mode={
+            terminal.mode === '1m' || terminal.mode === '5m'
+              ? 'scalp'
+              : terminal.mode === '15m' || terminal.mode === '1h'
+                ? 'swing'
+                : 'position'
+          }
           tick={tick}
           autoTrade={terminal.autoTrade}
           liveState={liveState}

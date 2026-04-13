@@ -34,14 +34,14 @@ type OpenClawValidationResponse = {
   symbol: string;
   suggested_setup: OpenClawValidatedSetup | null;
   validated_setup: OpenClawValidatedSetup | null;
-  next_action: 'wait_for_entry_zone' | 'wait_for_new_data' | 'flip_direction' | 'ready_to_enter';
+  next_action: 'wait_for_entry_zone' | 'wait_for_new_data' | 'flip_direction' | 'ready_to_enter' | 'wait_for_pullback_reclaim' | 'wait_for_breakout';
 };
 export type FuturesAutoBotOpenClawValidationResult = {
   adjustment_notes: string[];
   confidence: number;
   reason: string;
   setup_id: string;
-  next_action: 'wait_for_entry_zone' | 'wait_for_new_data' | 'flip_direction' | 'ready_to_enter';
+  next_action: 'wait_for_entry_zone' | 'wait_for_new_data' | 'flip_direction' | 'ready_to_enter' | 'wait_for_pullback_reclaim' | 'wait_for_breakout';
   suggested_setup: OpenClawValidatedSetup | null;
   validated_setup: OpenClawValidatedSetup;
   validation_result: 'accepted' | 'rejected';
@@ -69,6 +69,7 @@ const openClawPromptInstructions = [
   'MANDATE: Both accept and reject responses MUST include numeric stop_loss and take_profit values.',
   'Setup coherence: check alignment across timeframes, risk/reward validity, clear entry trigger.',
   'For {BOT_MODE}: adjust timeframe emphasis. Output ONLY JSON, no markdown, no explanation.',
+  '{VOLATILITY_INSTRUCTION}',
 ].join(' ');
 
 const openClawPositionOptimizationPromptInstructions = [
@@ -127,11 +128,7 @@ async function writeOpenClawValidationErrorLog(logDir: string, error: unknown) {
   );
 }
 async function writeOpenClawRawResponseLog(logDir: string, rawResponse: string) {
-  await writeFile(
-    join(logDir, 'raw_response.txt'),
-    rawResponse,
-    'utf8',
-  );
+  await writeFile(join(logDir, 'raw_response.txt'), rawResponse, 'utf8');
 }
 async function writeOpenClawValidationOutcomeLog(
   logDir: string,
@@ -183,10 +180,24 @@ async function runOpenClawValidation(snapshot: CoinValidationSnapshot, botMode: 
   await writeOpenClawValidationRequestLog(logDir, snapshot, timestamp);
 
   try {
-    console.log('[openclaw validation] request', { snapshot, botMode });
+    console.log('[openclaw validation] request', { snapshot, botMode, volatility: snapshot.current_context.volatility_state });
 
     const botModeLabel = botMode === 'scalping' ? 'scalping (quick micro trades)' : 'intraday (longer holding periods)';
-    const prompt = openClawPromptInstructions.replace('{BOT_MODE}', botModeLabel);
+
+    // Generate volatility-aware instruction
+    const volatilityState = snapshot.current_context.volatility_state;
+    let volatilityInstruction = '';
+    if (volatilityState === 'high') {
+      volatilityInstruction = 'VOLATILITY_HIGH: This coin has high volatility. Use TIGHTER stop losses (3-5% from entry) and CLOSER take profits. Avoid wide TP ranges.';
+    } else if (volatilityState === 'extreme') {
+      volatilityInstruction = 'VOLATILITY_EXTREME: This coin has EXTREME volatility. Use VERY TIGHT stop losses (1-3% from entry), CLOSE take profits, and favor smaller risk/reward ratios. Consider rejecting if no clean micro-entry available.';
+    } else {
+      volatilityInstruction = 'Volatility is normal/low. Standard TP/SL distances are acceptable.';
+    }
+
+    const prompt = openClawPromptInstructions
+      .replace('{BOT_MODE}', botModeLabel)
+      .replace('{VOLATILITY_INSTRUCTION}', volatilityInstruction);
 
     const rawOutput = await new Promise<string>((resolve, reject) => {
       let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
@@ -212,10 +223,10 @@ async function runOpenClawValidation(snapshot: CoinValidationSnapshot, botMode: 
       );
       let stderr = '';
       let stdout = '';
-      child.stderr.on('data', (chunk) => {
+      child.stderr!.on('data', (chunk) => {
         stderr += chunk.toString();
       });
-      child.stdout.on('data', (chunk) => {
+      child.stdout!.on('data', (chunk) => {
         stdout += chunk.toString();
       });
       child.on('error', (error) => {
@@ -271,8 +282,14 @@ async function runOpenClawValidation(snapshot: CoinValidationSnapshot, botMode: 
       fallbackSetup.stop_loss = fallback.sl;
       fallbackSetup.take_profit = { tp1: fallback.tp1, tp2: fallback.tp2 };
       fallbackSetup.risk_reward = {
-        tp1: Math.abs((fallbackSetup.take_profit.tp1 - fallbackSetup.planned_entry) / Math.max(Math.abs(fallbackSetup.planned_entry - fallbackSetup.stop_loss), 1)),
-        tp2: Math.abs((fallbackSetup.take_profit.tp2 - fallbackSetup.planned_entry) / Math.max(Math.abs(fallbackSetup.planned_entry - fallbackSetup.stop_loss), 1)),
+        tp1: Math.abs(
+          (fallbackSetup.take_profit.tp1 - fallbackSetup.planned_entry) /
+            Math.max(Math.abs(fallbackSetup.planned_entry - fallbackSetup.stop_loss), 1),
+        ),
+        tp2: Math.abs(
+          (fallbackSetup.take_profit.tp2 - fallbackSetup.planned_entry) /
+            Math.max(Math.abs(fallbackSetup.planned_entry - fallbackSetup.stop_loss), 1),
+        ),
       };
 
       response = {
@@ -376,62 +393,90 @@ function createRejectedResult(
     validation_result: 'rejected',
   };
 }
+function stripHtmlFromOpenClawResponse(obj: any): any {
+  if (typeof obj === 'string') {
+    return obj
+      // Step 1: Decode HTML entities FIRST
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      // Step 2: Remove HTML tags (now decoded)
+      .replace(/<[^>]*>/g, '')
+      .trim();
+  }
+  if (Array.isArray(obj)) {
+    return obj.map((item) => stripHtmlFromOpenClawResponse(item));
+  }
+  if (obj !== null && typeof obj === 'object') {
+    return Object.fromEntries(
+      Object.entries(obj).map(([key, value]) => [key, stripHtmlFromOpenClawResponse(value)]),
+    );
+  }
+  return obj;
+}
+
 function parseOpenClawResponse(rawResponse: string): OpenClawValidationResponse {
   const parsed = JSON.parse(extractJsonPayload(rawResponse)) as Partial<OpenClawValidationResponse>;
 
+  // Strip HTML from all fields in response (OpenClaw may include HTML-formatted text)
+  const cleanedParsed = stripHtmlFromOpenClawResponse(parsed);
+
   // Normalize direction case in suggested_setup
-  if (parsed.suggested_setup && typeof parsed.suggested_setup === 'object') {
-    const dir = (parsed.suggested_setup as any)?.direction?.toLowerCase?.();
+  if (cleanedParsed.suggested_setup && typeof cleanedParsed.suggested_setup === 'object') {
+    const dir = (cleanedParsed.suggested_setup as any)?.direction?.toLowerCase?.();
     if (dir === 'long' || dir === 'short') {
-      (parsed.suggested_setup as any).direction = dir;
+      (cleanedParsed.suggested_setup as any).direction = dir;
     }
   }
 
   // Normalize direction case in validated_setup
-  if (parsed.validated_setup && typeof parsed.validated_setup === 'object') {
-    const dir = (parsed.validated_setup as any)?.direction?.toLowerCase?.();
+  if (cleanedParsed.validated_setup && typeof cleanedParsed.validated_setup === 'object') {
+    const dir = (cleanedParsed.validated_setup as any)?.direction?.toLowerCase?.();
     if (dir === 'long' || dir === 'short') {
-      (parsed.validated_setup as any).direction = dir;
+      (cleanedParsed.validated_setup as any).direction = dir;
     }
   }
 
-  if (
-    typeof parsed.setup_id !== 'string' ||
-    typeof parsed.symbol !== 'string' ||
-    parsed.exchange !== 'binance' ||
-    parsed.market_type !== 'futures' ||
-    typeof parsed.is_perpetual !== 'boolean' ||
-    typeof parsed.confidence !== 'number' ||
-    !Number.isFinite(parsed.confidence) ||
-    parsed.confidence < 0 ||
-    parsed.confidence > 1 ||
-    (parsed.decision !== 'accept' && parsed.decision !== 'reject') ||
-    typeof parsed.accepted !== 'boolean' ||
-    !Array.isArray(parsed.rejection_reasons) ||
-    parsed.rejection_reasons.some((item) => typeof item !== 'string') ||
-    !Array.isArray(parsed.adjustment_notes) ||
-    parsed.adjustment_notes.some((item) => typeof item !== 'string') ||
-    (parsed.next_action !== 'wait_for_entry_zone' &&
-      parsed.next_action !== 'wait_for_new_data' &&
-      parsed.next_action !== 'flip_direction' &&
-      parsed.next_action !== 'ready_to_enter') ||
-    (parsed.suggested_setup !== null &&
-      (typeof parsed.suggested_setup !== 'object' ||
-        parsed.suggested_setup === null ||
-        (parsed.suggested_setup.direction !== 'long' && parsed.suggested_setup.direction !== 'short'))) ||
-    !('validated_setup' in parsed)
-  ) {
-    throw new Error('OpenClaw returned an invalid validation payload.');
+  // Validate response structure with detailed error messages
+  const validationErrors: string[] = [];
+
+  if (typeof cleanedParsed.setup_id !== 'string') validationErrors.push(`setup_id is not string: ${typeof cleanedParsed.setup_id}`);
+  if (typeof cleanedParsed.symbol !== 'string') validationErrors.push(`symbol is not string: ${typeof cleanedParsed.symbol}`);
+  if (cleanedParsed.exchange !== 'binance') validationErrors.push(`exchange is not 'binance': ${cleanedParsed.exchange}`);
+  if (cleanedParsed.market_type !== 'futures') validationErrors.push(`market_type is not 'futures': ${cleanedParsed.market_type}`);
+  if (typeof cleanedParsed.is_perpetual !== 'boolean') validationErrors.push(`is_perpetual is not boolean: ${typeof cleanedParsed.is_perpetual}`);
+  if (typeof cleanedParsed.confidence !== 'number') validationErrors.push(`confidence is not number: ${typeof cleanedParsed.confidence}`);
+  if (!Number.isFinite(cleanedParsed.confidence)) validationErrors.push(`confidence is not finite: ${cleanedParsed.confidence}`);
+  if (cleanedParsed.confidence < 0 || cleanedParsed.confidence > 1) validationErrors.push(`confidence out of range [0,1]: ${cleanedParsed.confidence}`);
+  if (cleanedParsed.decision !== 'accept' && cleanedParsed.decision !== 'reject') validationErrors.push(`decision is not 'accept'|'reject': ${cleanedParsed.decision}`);
+  if (typeof cleanedParsed.accepted !== 'boolean') validationErrors.push(`accepted is not boolean: ${typeof cleanedParsed.accepted}`);
+  if (!Array.isArray(cleanedParsed.rejection_reasons)) validationErrors.push(`rejection_reasons is not array: ${typeof cleanedParsed.rejection_reasons}`);
+  if (Array.isArray(cleanedParsed.rejection_reasons) && cleanedParsed.rejection_reasons.some((item: any) => typeof item !== 'string')) validationErrors.push(`rejection_reasons contains non-string items`);
+  if (!Array.isArray(cleanedParsed.adjustment_notes)) validationErrors.push(`adjustment_notes is not array: ${typeof cleanedParsed.adjustment_notes}`);
+  if (Array.isArray(cleanedParsed.adjustment_notes) && cleanedParsed.adjustment_notes.some((item: any) => typeof item !== 'string')) validationErrors.push(`adjustment_notes contains non-string items`);
+  const validNextActions = ['wait_for_entry_zone', 'wait_for_new_data', 'flip_direction', 'ready_to_enter', 'wait_for_pullback_reclaim', 'wait_for_breakout'];
+  if (!validNextActions.includes(cleanedParsed.next_action)) validationErrors.push(`next_action is invalid: ${cleanedParsed.next_action}`);
+  if (cleanedParsed.suggested_setup !== null && typeof cleanedParsed.suggested_setup !== 'object') validationErrors.push(`suggested_setup is not null|object: ${typeof cleanedParsed.suggested_setup}`);
+  if (cleanedParsed.suggested_setup !== null && typeof cleanedParsed.suggested_setup === 'object' && cleanedParsed.suggested_setup.direction !== 'long' && cleanedParsed.suggested_setup.direction !== 'short') validationErrors.push(`suggested_setup.direction is invalid: ${cleanedParsed.suggested_setup.direction}`);
+  if (!('validated_setup' in cleanedParsed)) validationErrors.push(`validated_setup field is missing`);
+
+  if (validationErrors.length > 0) {
+    const errorDetails = validationErrors.join('; ');
+    console.error(`[parseOpenClawResponse] Validation failed: ${errorDetails}`);
+    console.error(`[parseOpenClawResponse] Raw cleanedParsed keys: ${Object.keys(cleanedParsed).join(', ')}`);
+    throw new Error(`OpenClaw returned an invalid validation payload: ${errorDetails}`);
   }
 
-  if (parsed.decision === 'accept') {
-    if (!parsed.accepted) {
+  if (cleanedParsed.decision === 'accept') {
+    if (!cleanedParsed.accepted) {
       throw new Error('OpenClaw accepted decision must set accepted=true.');
     }
-    if (parsed.validated_setup === null || typeof parsed.validated_setup !== 'object') {
+    if (cleanedParsed.validated_setup === null || typeof cleanedParsed.validated_setup !== 'object') {
       throw new Error('OpenClaw accepted the setup without a validated_setup payload.');
     }
-    const validatedSetup = parsed.validated_setup;
+    const validatedSetup = cleanedParsed.validated_setup;
 
     // LENIENT validation - accept almost anything and auto-fix with fallbacks
     if (!validatedSetup) {
@@ -439,10 +484,9 @@ function parseOpenClawResponse(rawResponse: string): OpenClawValidationResponse 
     }
 
     // Use provided direction or default to 'long'
-    const direction = (validatedSetup.direction === 'long' || validatedSetup.direction === 'short')
-      ? validatedSetup.direction
-      : 'long';
-    parsed.validated_setup!.direction = direction;
+    const direction =
+      validatedSetup.direction === 'long' || validatedSetup.direction === 'short' ? validatedSetup.direction : 'long';
+    cleanedParsed.validated_setup!.direction = direction;
 
     // Use provided entry_zone or create one
     let entryZone = validatedSetup.entry_zone as [number, number];
@@ -450,14 +494,14 @@ function parseOpenClawResponse(rawResponse: string): OpenClawValidationResponse 
       const ep = Number(validatedSetup.planned_entry) || 100;
       entryZone = [ep * 0.99, ep * 1.01];
     }
-    parsed.validated_setup!.entry_zone = entryZone;
+    cleanedParsed.validated_setup!.entry_zone = entryZone;
 
     // Use provided planned_entry or use entry_zone midpoint
     let plannedEntry = Number(validatedSetup.planned_entry);
     if (!Number.isFinite(plannedEntry)) {
       plannedEntry = (entryZone[0] + entryZone[1]) / 2;
     }
-    parsed.validated_setup!.planned_entry = plannedEntry;
+    cleanedParsed.validated_setup!.planned_entry = plannedEntry;
 
     // CRITICAL: Auto-fix TP/SL - ALWAYS have valid numeric values
     const origStopLoss = Number(validatedSetup.stop_loss);
@@ -466,78 +510,84 @@ function parseOpenClawResponse(rawResponse: string): OpenClawValidationResponse 
 
     const fallback = generateFallbackTPSL(plannedEntry, direction);
 
-    parsed.validated_setup!.stop_loss = Number.isFinite(origStopLoss) ? origStopLoss : fallback.sl;
-    parsed.validated_setup!.take_profit = {
+    cleanedParsed.validated_setup!.stop_loss = Number.isFinite(origStopLoss) ? origStopLoss : fallback.sl;
+    cleanedParsed.validated_setup!.take_profit = {
       tp1: Number.isFinite(origTp1) ? origTp1 : fallback.tp1,
       tp2: Number.isFinite(origTp2) ? origTp2 : fallback.tp2,
     };
 
     // Also ensure risk_reward has valid values
-    parsed.validated_setup!.risk_reward = {
-      tp1: Math.abs((parsed.validated_setup!.take_profit.tp1 - plannedEntry) / Math.max(Math.abs(plannedEntry - parsed.validated_setup!.stop_loss), 1)),
-      tp2: Math.abs((parsed.validated_setup!.take_profit.tp2 - plannedEntry) / Math.max(Math.abs(plannedEntry - parsed.validated_setup!.stop_loss), 1)),
+    cleanedParsed.validated_setup!.risk_reward = {
+      tp1: Math.abs(
+        (cleanedParsed.validated_setup!.take_profit.tp1 - plannedEntry) /
+          Math.max(Math.abs(plannedEntry - cleanedParsed.validated_setup!.stop_loss), 1),
+      ),
+      tp2: Math.abs(
+        (cleanedParsed.validated_setup!.take_profit.tp2 - plannedEntry) /
+          Math.max(Math.abs(plannedEntry - cleanedParsed.validated_setup!.stop_loss), 1),
+      ),
     };
   }
 
-  if (parsed.decision === 'reject' && parsed.accepted) {
+  if (cleanedParsed.decision === 'reject' && cleanedParsed.accepted) {
     throw new Error('OpenClaw rejected decision must set accepted=false.');
   }
 
-  if (parsed.decision === 'reject' && parsed.validated_setup !== null) {
+  if (cleanedParsed.decision === 'reject' && cleanedParsed.validated_setup !== null) {
     throw new Error('OpenClaw returned a rejected payload with a non-null validated_setup.');
   }
 
   return {
-    accepted: parsed.accepted,
-    adjustment_notes: parsed.adjustment_notes,
-    confidence: parsed.confidence,
-    decision: parsed.decision,
-    exchange: parsed.exchange,
-    is_perpetual: parsed.is_perpetual,
-    market_type: parsed.market_type,
-    next_action: parsed.next_action,
-    rejection_reasons: parsed.rejection_reasons,
-    setup_id: parsed.setup_id,
-    symbol: parsed.symbol,
+    accepted: cleanedParsed.accepted,
+    adjustment_notes: cleanedParsed.adjustment_notes,
+    confidence: cleanedParsed.confidence,
+    decision: cleanedParsed.decision,
+    exchange: cleanedParsed.exchange,
+    is_perpetual: cleanedParsed.is_perpetual,
+    market_type: cleanedParsed.market_type,
+    next_action: cleanedParsed.next_action,
+    rejection_reasons: cleanedParsed.rejection_reasons,
+    setup_id: cleanedParsed.setup_id,
+    symbol: cleanedParsed.symbol,
     suggested_setup:
-      parsed.suggested_setup && parsed.decision === 'reject'
+      cleanedParsed.suggested_setup && cleanedParsed.decision === 'reject'
         ? ({
-            direction: parsed.suggested_setup.direction,
+            direction: cleanedParsed.suggested_setup.direction,
             entry_zone: [
-              Number(parsed.suggested_setup.entry_zone[0]),
-              Number(parsed.suggested_setup.entry_zone[1]),
+              Number(cleanedParsed.suggested_setup.entry_zone[0]),
+              Number(cleanedParsed.suggested_setup.entry_zone[1]),
             ] as [number, number],
-            planned_entry: Number(parsed.suggested_setup.planned_entry),
+            planned_entry: Number(cleanedParsed.suggested_setup.planned_entry),
             risk_reward: {
-              tp1: Number(parsed.suggested_setup.risk_reward.tp1),
-              tp2: Number(parsed.suggested_setup.risk_reward.tp2),
+              tp1: Number(cleanedParsed.suggested_setup.risk_reward.tp1),
+              tp2: Number(cleanedParsed.suggested_setup.risk_reward.tp2),
             },
-            setup_type: parsed.suggested_setup.setup_type,
-            stop_loss: Number(parsed.suggested_setup.stop_loss),
+            setup_type: cleanedParsed.suggested_setup.setup_type,
+            stop_loss: Number(cleanedParsed.suggested_setup.stop_loss),
             take_profit: {
-              tp1: Number(parsed.suggested_setup.take_profit.tp1),
-              tp2: Number(parsed.suggested_setup.take_profit.tp2),
+              tp1: Number(cleanedParsed.suggested_setup.take_profit.tp1),
+              tp2: Number(cleanedParsed.suggested_setup.take_profit.tp2),
             },
           } satisfies OpenClawValidatedSetup)
         : null,
     validated_setup:
-      parsed.decision === 'accept'
+      cleanedParsed.decision === 'accept'
         ? ({
-            direction: parsed.validated_setup!.direction,
+            direction: cleanedParsed.validated_setup!.direction,
             entry_zone: [
-              Number(parsed.validated_setup!.entry_zone[0]),
-              Number(parsed.validated_setup!.entry_zone[1]),
+              Number(cleanedParsed.validated_setup!.entry_zone[0]),
+              Number(cleanedParsed.validated_setup!.entry_zone[1]),
             ] as [number, number],
-            planned_entry: Number(parsed.validated_setup!.planned_entry),
+            planned_entry: Number(cleanedParsed.validated_setup!.planned_entry),
             risk_reward: {
-              tp1: Number(parsed.validated_setup!.risk_reward.tp1),
-              tp2: Number(parsed.validated_setup!.risk_reward.tp2),
+              tp1: Number(cleanedParsed.validated_setup!.risk_reward.tp1),
+              tp2: Number(cleanedParsed.validated_setup!.risk_reward.tp2),
             },
-            setup_type: parsed.validated_setup!.setup_type,
-            stop_loss: Number(parsed.validated_setup!.stop_loss),
+            setup_type: cleanedParsed.validated_setup!.setup_type,
+            stop_loss: Number(cleanedParsed.validated_setup!.stop_loss),
             take_profit: {
-              tp1: Number(parsed.validated_setup!.take_profit.tp1),
-              tp2: Number(parsed.validated_setup!.take_profit.tp2),
+              tp1: Number(cleanedParsed.validated_setup!.take_profit.tp1),
+              tp2: Number(cleanedParsed.validated_setup!.take_profit.tp2),
             },
           } satisfies OpenClawValidatedSetup)
         : null,
@@ -811,19 +861,19 @@ async function sendValidationNotification(
     const tp1 = result.validated_setup.take_profit.tp1.toFixed(4);
     const tp2 = result.validated_setup.take_profit.tp2.toFixed(4);
 
-    let message = `<b>🤖 OpenClaw Validation</b>\n`;
-    message += `<code>${snapshot.symbol}</code> | ${direction} | ${decision}\n\n`;
+    let message = `🤖 OpenClaw Validation\n`;
+    message += `${snapshot.symbol} | ${direction} | ${decision}\n\n`;
 
-    message += `<b>Setup Type:</b> ${setupType}\n`;
-    message += `<b>Confidence:</b> ${confidencePercent}%\n`;
-    message += `<b>Next Action:</b> ${result.next_action.replace(/_/g, ' ').toUpperCase()}\n\n`;
+    message += `Setup Type: ${setupType}\n`;
+    message += `Confidence: ${confidencePercent}%\n`;
+    message += `Next Action: ${result.next_action.replace(/_/g, ' ').toUpperCase()}\n\n`;
 
-    message += `<b>📊 Validated Setup:</b>\n`;
-    message += `Entry Zone: <code>${entryZoneStr}</code>\n`;
-    message += `Planned Entry: <code>${plannedEntry}</code>\n`;
-    message += `Stop Loss: <code>${stopLoss}</code>\n`;
-    message += `TP1: <code>${tp1}</code>\n`;
-    message += `TP2: <code>${tp2}</code>\n`;
+    message += `📊 Validated Setup:\n`;
+    message += `Entry Zone: ${entryZoneStr}\n`;
+    message += `Planned Entry: ${plannedEntry}\n`;
+    message += `Stop Loss: ${stopLoss}\n`;
+    message += `TP1: ${tp1}\n`;
+    message += `TP2: ${tp2}\n`;
     message += `Risk/Reward: TP1=${result.validated_setup.risk_reward.tp1.toFixed(2)}, TP2=${result.validated_setup.risk_reward.tp2.toFixed(2)}\n\n`;
 
     if (result.suggested_setup) {
@@ -836,26 +886,26 @@ async function sendValidationNotification(
       const suggestedTP1 = result.suggested_setup.take_profit.tp1.toFixed(4);
       const suggestedTP2 = result.suggested_setup.take_profit.tp2.toFixed(4);
 
-      message += `<b>💡 Suggested Setup:</b>\n`;
+      message += `💡 Suggested Setup:\n`;
       message += `Direction: ${suggestedDirection}\n`;
       message += `Setup Type: ${suggestedSetupType}\n`;
-      message += `Entry Zone: <code>${suggestedEntryZoneStr}</code>\n`;
-      message += `Planned Entry: <code>${suggestedPlannedEntry}</code>\n`;
-      message += `Stop Loss: <code>${suggestedSL}</code>\n`;
-      message += `TP1: <code>${suggestedTP1}</code>\n`;
-      message += `TP2: <code>${suggestedTP2}</code>\n`;
+      message += `Entry Zone: ${suggestedEntryZoneStr}\n`;
+      message += `Planned Entry: ${suggestedPlannedEntry}\n`;
+      message += `Stop Loss: ${suggestedSL}\n`;
+      message += `TP1: ${suggestedTP1}\n`;
+      message += `TP2: ${suggestedTP2}\n`;
       message += `Risk/Reward: TP1=${result.suggested_setup.risk_reward.tp1.toFixed(2)}, TP2=${result.suggested_setup.risk_reward.tp2.toFixed(2)}\n\n`;
     }
 
     if (result.adjustment_notes.length > 0) {
-      message += `<b>📝 Adjustment Notes:</b>\n`;
+      message += `📝 Adjustment Notes:\n`;
       result.adjustment_notes.forEach((note) => {
         message += `• ${note}\n`;
       });
       message += '\n';
     }
 
-    message += `<b>💬 Reason:</b> ${result.reason}`;
+    message += `💬 Reason: ${result.reason}`;
 
     await telegramService.sendMessage(message);
   } catch (error) {
@@ -985,10 +1035,10 @@ export class FuturesAutoValidationService {
 
           let stderr = '';
           let stdout = '';
-          child.stderr.on('data', (chunk) => {
+          child.stderr!.on('data', (chunk) => {
             stderr += chunk.toString();
           });
-          child.stdout.on('data', (chunk) => {
+          child.stdout!.on('data', (chunk) => {
             stdout += chunk.toString();
           });
           child.on('error', (error) => {
@@ -1003,13 +1053,14 @@ export class FuturesAutoValidationService {
                 reject(new Error(`openclaw agent returned no output.${stderr ? ` stderr: ${stderr.trim()}` : ''}`));
                 return;
               }
-              console.log('[openclaw position-optimization] OpenClaw returned:', preferredOutput.substring(0, 100) + '...');
+              console.log(
+                '[openclaw position-optimization] OpenClaw returned:',
+                preferredOutput.substring(0, 100) + '...',
+              );
               resolve(preferredOutput);
               return;
             }
-            reject(
-              new Error(`openclaw agent exited with code ${code}${stderr ? `: ${stderr.trim()}` : ''}`),
-            );
+            reject(new Error(`openclaw agent exited with code ${code}${stderr ? `: ${stderr.trim()}` : ''}`));
           });
         });
 
@@ -1030,7 +1081,9 @@ export class FuturesAutoValidationService {
           try {
             rawResponse = parseOpenClawResponse(rawOutput);
           } catch (parseError) {
-            console.log('[openclaw position-optimization] warning: could not parse response, creating minimal response object');
+            console.log(
+              '[openclaw position-optimization] warning: could not parse response, creating minimal response object',
+            );
             // Create minimal response object with parsed result data
             rawResponse = {
               setup_id: parsedResult.setup_id,
@@ -1049,10 +1102,16 @@ export class FuturesAutoValidationService {
             };
           }
           await writeOpenClawValidationOutcomeLog(logDir, rawResponse, parsedResult).catch((writeError) => {
-            console.log('[openclaw position-optimization] error writing result log:', writeError instanceof Error ? writeError.message : String(writeError));
+            console.log(
+              '[openclaw position-optimization] error writing result log:',
+              writeError instanceof Error ? writeError.message : String(writeError),
+            );
           });
         } catch (logError) {
-          console.log('[openclaw position-optimization] critical error in result logging:', logError instanceof Error ? logError.message : String(logError));
+          console.log(
+            '[openclaw position-optimization] critical error in result logging:',
+            logError instanceof Error ? logError.message : String(logError),
+          );
         }
 
         await sendValidationNotification(snapshot, parsedResult);
@@ -1068,25 +1127,32 @@ export class FuturesAutoValidationService {
 
         // Always write error result to result.json
         try {
-          await writeOpenClawValidationOutcomeLog(logDir, {
-            setup_id: snapshot.setup_id,
-            symbol: snapshot.symbol,
-            exchange: 'binance',
-            market_type: 'futures',
-            is_perpetual: snapshot.is_perpetual,
-            confidence: 0,
-            decision: 'reject',
-            accepted: false,
-            rejection_reasons: [errorMsg],
-            adjustment_notes: ['Error during OpenClaw processing. Please retry.'],
-            next_action: 'wait_for_new_data',
-            suggested_setup: null,
-            validated_setup: null,
-          }, rejectedResult).catch(() => {
+          await writeOpenClawValidationOutcomeLog(
+            logDir,
+            {
+              setup_id: snapshot.setup_id,
+              symbol: snapshot.symbol,
+              exchange: 'binance',
+              market_type: 'futures',
+              is_perpetual: snapshot.is_perpetual,
+              confidence: 0,
+              decision: 'reject',
+              accepted: false,
+              rejection_reasons: [errorMsg],
+              adjustment_notes: ['Error during OpenClaw processing. Please retry.'],
+              next_action: 'wait_for_new_data',
+              suggested_setup: null,
+              validated_setup: null,
+            },
+            rejectedResult,
+          ).catch(() => {
             /* ignore logging errors */
           });
         } catch (logError) {
-          console.log('[openclaw position-optimization] warning: could not write error result:', logError instanceof Error ? logError.message : String(logError));
+          console.log(
+            '[openclaw position-optimization] warning: could not write error result:',
+            logError instanceof Error ? logError.message : String(logError),
+          );
         }
 
         await sendValidationNotification(snapshot, rejectedResult);

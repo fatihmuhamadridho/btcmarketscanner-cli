@@ -159,9 +159,14 @@ function splitTakeProfitQuantityByWeights(totalQuantity: number, stepSize: numbe
   let remainingQuantity = totalQuantity;
   normalizedWeights.forEach((weight, index) => {
     const isLast = index === normalizedWeights.length - 1;
-    const quantity = isLast
-      ? roundDownToStep(remainingQuantity, stepSize)
-      : roundDownToStep(totalQuantity * weight, stepSize);
+    let quantity: number;
+    if (isLast) {
+      // Last TP gets all remaining quantity (ensures perfect split with no leftover)
+      quantity = remainingQuantity;
+    } else {
+      // Other TPs get weighted share, rounded down
+      quantity = roundDownToStep(totalQuantity * weight, stepSize);
+    }
     quantities.push(quantity);
     remainingQuantity = Math.max(0, remainingQuantity - quantity);
   });
@@ -347,59 +352,138 @@ export class FuturesAutoTradeService {
       }) ?? null;
     let targetPosition = await resolveTargetPosition();
     if (!targetPosition) throw new Error(`No open position found for ${symbol}.`);
+
+    console.log(`[closePosition] Starting to close position for ${symbol}, side=${targetPosition.positionSide}, amount=${targetPosition.positionAmt}`);
+
     await this.cancelProtectionOrders(symbol, targetPosition.positionSide ?? positionSide ?? 'BOTH');
     let lastOrderResponse: FuturesOrderResponse | null = null;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    const maxAttempts = 10; // Increased from 2 to handle multiple partial closes
+    let closedQuantity = 0;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       targetPosition = await resolveTargetPosition();
-      if (!targetPosition) break;
+      if (!targetPosition) {
+        console.log(`[closePosition] Position fully closed after ${attempt} attempts, total closed: ${closedQuantity}`);
+        break;
+      }
+
       const rawQuantity = Math.abs(parseNumber(targetPosition.positionAmt) ?? 0);
+
+      // Consider positions smaller than 0.00001 as dust and close them anyway
+      if (rawQuantity < 0.00001) {
+        console.log(`[closePosition] Dust position detected: ${rawQuantity}, attempting to close as ${rawQuantity}`);
+      } else if (rawQuantity === 0) {
+        console.log(`[closePosition] No remaining position after attempt ${attempt}`);
+        break;
+      }
+
+      // Try to round down to step size, but if that results in 0, use the raw quantity
       const quantity = roundDownToStep(rawQuantity, stepSize);
-      if (quantity <= 0) break;
+      let finalQuantity = quantity;
+
+      if (quantity <= 0 && rawQuantity > 0) {
+        // Rounding resulted in 0, but we have a position - try to close anyway
+        // Use a smaller value that respects step size
+        const minStep = stepSize && stepSize > 0 ? stepSize : 0.00001;
+        finalQuantity = Math.max(minStep, rawQuantity);
+        console.log(`[closePosition] Rounded quantity was 0, using final quantity ${finalQuantity} (raw: ${rawQuantity})`);
+      } else if (quantity <= 0) {
+        console.log(`[closePosition] Quantity too small to close: ${rawQuantity}, breaking after ${attempt} attempts`);
+        break;
+      }
       const exitSide: FuturesOrderSide = (parseNumber(targetPosition.positionAmt) ?? 0) > 0 ? 'SELL' : 'BUY';
-      lastOrderResponse = await this.request<FuturesOrderResponse>('/fapi/v1/order', {
-        method: 'POST',
-        params: {
-          symbol,
-          side: exitSide,
-          type: 'MARKET',
-          quantity,
-          ...(dualSidePosition
-            ? { positionSide: targetPosition.positionSide ?? positionSide ?? 'BOTH' }
-            : { reduceOnly: true }),
-          newOrderRespType: 'RESULT',
-        },
-        signed: true,
-      });
-      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      try {
+        console.log(`[closePosition] Attempt ${attempt + 1}/${maxAttempts}: closing ${finalQuantity} (raw: ${rawQuantity}), side=${exitSide}`);
+        lastOrderResponse = await this.request<FuturesOrderResponse>('/fapi/v1/order', {
+          method: 'POST',
+          params: {
+            symbol,
+            side: exitSide,
+            type: 'MARKET',
+            quantity: finalQuantity,
+            ...(dualSidePosition
+              ? { positionSide: targetPosition.positionSide ?? positionSide ?? 'BOTH' }
+              : { reduceOnly: true }),
+            newOrderRespType: 'RESULT',
+          },
+          signed: true,
+        });
+
+        closedQuantity += finalQuantity;
+        console.log(`[closePosition] Order placed, executedQty=${lastOrderResponse.executedQty}, status=${lastOrderResponse.status}`);
+
+        // Wait before next attempt to let order settle
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : 'Unknown error';
+        console.error(`[closePosition] Error on attempt ${attempt + 1}: ${errMsg}`);
+        throw error;
+      }
     }
+
     if (!lastOrderResponse) throw new Error(`Unable to close position for ${symbol}.`);
+
+    // Final verification: check remaining position
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const finalPosition = await resolveTargetPosition();
+    if (finalPosition) {
+      const remainingAmt = Math.abs(parseNumber(finalPosition.positionAmt) ?? 0);
+      console.warn(`[closePosition] WARNING: Position still has ${remainingAmt} remaining after close attempt!`);
+    }
+
     await this.cancelProtectionOrders(symbol, positionSide ?? 'BOTH');
     return lastOrderResponse;
   }
   async cancelProtectionOrders(symbol: string, positionSide?: 'BOTH' | 'LONG' | 'SHORT') {
     const [regularOrders, algoOrders] = await this.getOpenOrders(symbol);
+
+    // Filter protection orders more carefully
+    const regularProtectionOrders = regularOrders.filter(
+      (order) => isProtectionOrderType(order.type) && matchesPositionSide(order.positionSide, positionSide),
+    );
+
+    const algoProtectionOrders = algoOrders.filter(
+      (order) =>
+        (order.reduceOnly === true || isProtectionOrderType(order.type) || order.closePosition === true) &&
+        matchesPositionSide(order.positionSide, positionSide),
+    );
+
+    console.log(
+      `[cancelProtectionOrders] ${symbol}: Found ${regularProtectionOrders.length} regular + ${algoProtectionOrders.length} algo protection orders to cancel (positionSide=${positionSide})`,
+    );
+
+    // Log details of orders being cancelled
+    regularProtectionOrders.forEach((order) => {
+      console.log(
+        `[cancelProtectionOrders] ${symbol}: Canceling regular order - orderId=${order.orderId}, type=${order.type}, side=${order.positionSide}`,
+      );
+    });
+    algoProtectionOrders.forEach((order) => {
+      console.log(
+        `[cancelProtectionOrders] ${symbol}: Canceling algo order - algoId=${order.algoId}, type=${order.type}, side=${order.positionSide}, reduceOnly=${order.reduceOnly}, closePosition=${order.closePosition}`,
+      );
+    });
+
+    if (regularProtectionOrders.length === 0 && algoProtectionOrders.length === 0) {
+      console.log(`[cancelProtectionOrders] ${symbol}: No protection orders found to cancel`);
+      console.log(`[cancelProtectionOrders] ${symbol}: All open orders: ${JSON.stringify(regularOrders.concat(algoOrders as any))}`);
+    }
+
     await Promise.allSettled([
-      ...regularOrders
-        .filter((order) => isProtectionOrderType(order.type) && matchesPositionSide(order.positionSide, positionSide))
-        .map((order) =>
-          this.cancelOpenOrder(symbol, {
-            mode: 'Regular',
-            clientOrderId: order.clientOrderId ?? null,
-            orderId: order.orderId,
-          }),
-        ),
-      ...algoOrders
-        .filter(
-          (order) =>
-            (order.reduceOnly === true || isProtectionOrderType(order.type) || order.closePosition === true) &&
-            matchesPositionSide(order.positionSide, positionSide),
-        )
-        .map((order) =>
-          this.cancelOpenOrder(symbol, {
-            mode: 'Algo',
-            algoId: order.algoId,
-            clientOrderId: order.clientAlgoId ?? null,
-          }),
+      ...regularProtectionOrders.map((order) =>
+        this.cancelOpenOrder(symbol, {
+          mode: 'Regular',
+          clientOrderId: order.clientOrderId ?? null,
+          orderId: order.orderId,
+        }),
+      ),
+      ...algoProtectionOrders.map((order) =>
+        this.cancelOpenOrder(symbol, {
+          mode: 'Algo',
+          algoId: order.algoId,
+          clientOrderId: order.clientAlgoId ?? null,
+        }),
         ),
     ]);
   }
@@ -465,8 +549,14 @@ export class FuturesAutoTradeService {
     const positionSideParam = positionSide ? { positionSide } : {};
     const algoOrderOwnershipParam = account.dualSidePosition ? positionSideParam : { reduceOnly: true };
     const exitSide: FuturesOrderSide = plan.direction === 'long' ? 'SELL' : 'BUY';
-    const stopLossAlgoOrder = stopLossPrice
-      ? await this.request<FuturesAlgoOrderResponse>('/fapi/v1/algoOrder', {
+
+    // Place SL order with proper error handling
+    let stopLossAlgoOrder: FuturesAlgoOrderResponse | null = null;
+    let slError: Error | null = null;
+
+    if (stopLossPrice) {
+      try {
+        stopLossAlgoOrder = await this.request<FuturesAlgoOrderResponse>('/fapi/v1/algoOrder', {
           method: 'POST',
           params: {
             algoType: 'CONDITIONAL',
@@ -481,36 +571,87 @@ export class FuturesAutoTradeService {
             ...algoOrderOwnershipParam,
           },
           signed: true,
-        })
-      : null;
+        });
+      } catch (error) {
+        slError = error instanceof Error ? error : new Error('Failed to place SL order');
+        console.error(`[placeProtectionOrders] Failed to place SL order for ${plan.symbol}: ${slError.message}`);
+      }
+    }
+
+    // Calculate dynamic weights based on number of TPs to split evenly
+    const numTPs = Math.max(1, takeProfitPrices.length);
+    const baseWeight = 1 / numTPs;
+    const weights = Array(numTPs)
+      .fill(0)
+      .map((_, i) => {
+        // Distribute any rounding remainder to the last TP
+        if (i === numTPs - 1) {
+          return 1 - baseWeight * (numTPs - 1);
+        }
+        return baseWeight;
+      });
     const takeProfitQuantities = splitTakeProfitQuantityByWeights(
       quantity,
       stepSize,
-      [0.4, 0.3, 0.3].slice(takeProfitStartIndex),
+      weights.slice(takeProfitStartIndex),
     );
+
     const takeProfitAlgoOrders: FuturesAlgoOrderResponse[] = [];
+    const failedTpIndices: number[] = [];
+
     for (let index = 0; index < takeProfitPrices.length; index += 1) {
       const takeProfitPrice = takeProfitPrices[index];
-      const takeProfitQuantity = takeProfitQuantities[index];
+      // Important: takeProfitQuantities is sliced, so map index correctly
+      const quantityIndex = index - takeProfitStartIndex;
+      const takeProfitQuantity = quantityIndex >= 0 ? takeProfitQuantities[quantityIndex] : undefined;
+
+      console.log(
+        `[placeProtectionOrders] ${plan.symbol}: TP${index + 1} - price=${takeProfitPrice}, quantityIndex=${quantityIndex}, quantity=${takeProfitQuantity}, skip=${takeProfitPrice === undefined || takeProfitQuantity === undefined || takeProfitQuantity <= 0}`,
+      );
+
       if (takeProfitPrice === undefined || takeProfitQuantity === undefined || takeProfitQuantity <= 0) continue;
-      const order = await this.request<FuturesAlgoOrderResponse>('/fapi/v1/algoOrder', {
-        method: 'POST',
-        params: {
-          algoType: 'CONDITIONAL',
-          clientAlgoId: createClientAlgoId(plan.symbol, `tp${index + 1}`),
-          quantity: takeProfitQuantity,
-          symbol: plan.symbol,
-          side: exitSide,
-          triggerPrice: takeProfitPrice,
-          type: 'TAKE_PROFIT_MARKET',
-          workingType: 'MARK_PRICE',
-          ...positionSideParam,
-          ...algoOrderOwnershipParam,
-        },
-        signed: true,
-      });
-      takeProfitAlgoOrders.push(order);
+
+      try {
+        const order = await this.request<FuturesAlgoOrderResponse>('/fapi/v1/algoOrder', {
+          method: 'POST',
+          params: {
+            algoType: 'CONDITIONAL',
+            clientAlgoId: createClientAlgoId(plan.symbol, `tp${index + 1}`),
+            quantity: takeProfitQuantity,
+            symbol: plan.symbol,
+            side: exitSide,
+            triggerPrice: takeProfitPrice,
+            type: 'TAKE_PROFIT_MARKET',
+            workingType: 'MARK_PRICE',
+            ...positionSideParam,
+            ...algoOrderOwnershipParam,
+          },
+          signed: true,
+        });
+        takeProfitAlgoOrders.push(order);
+      } catch (error) {
+        const tpError = error instanceof Error ? error.message : 'Unknown error';
+        console.error(`[placeProtectionOrders] Failed to place TP${index + 1} order for ${plan.symbol}: ${tpError}`);
+        failedTpIndices.push(index + 1);
+      }
     }
+
+    // Validate that at least SL or at least one TP was placed
+    if (!stopLossAlgoOrder && takeProfitAlgoOrders.length === 0) {
+      const errorMsg = slError
+        ? `Failed to place both SL and TP orders. SL error: ${slError.message}, TP failed: ${failedTpIndices.length > 0}`
+        : 'Failed to place both SL and TP orders.';
+      throw new Error(errorMsg);
+    }
+
+    // Log warnings for partially failed orders
+    if (slError) {
+      console.warn(`[placeProtectionOrders] SL order failed for ${plan.symbol}, but TPs were placed (${takeProfitAlgoOrders.length}). This position is at risk!`);
+    }
+    if (failedTpIndices.length > 0) {
+      console.warn(`[placeProtectionOrders] Some TP orders failed for ${plan.symbol}: TP${failedTpIndices.join(', TP')}. SL placed: ${Boolean(stopLossAlgoOrder)}`);
+    }
+
     return {
       algoOrderClientIds: [
         stopLossAlgoOrder?.clientAlgoId ?? null,
@@ -525,6 +666,13 @@ export class FuturesAutoTradeService {
     const snapshot = await futuresMarketController.getMarketSymbolSnapshot(symbol);
     return snapshot.data.symbolInfo ?? null;
   }
+  setSymbolMarginMode(symbol: string, marginMode: 'isolated' | 'cross') {
+    return this.request<{ symbol: string; marginMode: string }>('/fapi/v1/marginType', {
+      method: 'POST',
+      params: { marginType: marginMode.toUpperCase(), symbol },
+      signed: true,
+    });
+  }
   setSymbolLeverage(symbol: string, leverage: number) {
     return this.request<FuturesLeverageResponse>('/fapi/v1/leverage', {
       method: 'POST',
@@ -537,6 +685,18 @@ export class FuturesAutoTradeService {
     const availableBalance = parseNumber(account.availableBalance ?? account.totalWalletBalance) ?? 0;
     const stepSize = extractStepSize(symbolInfo ?? undefined);
     const tickSize = extractTickSize(symbolInfo ?? undefined);
+
+    // Set margin mode FIRST (before leverage)
+    const marginMode = plan.marginMode || 'isolated';
+    try {
+      await this.setSymbolMarginMode(plan.symbol, marginMode);
+      console.log(`[executeTrade] Set margin mode to ${marginMode} for ${plan.symbol}`);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      console.warn(`[executeTrade] Failed to set margin mode for ${plan.symbol}: ${errorMsg}`);
+      // Continue anyway, might already be set
+    }
+
     await this.setSymbolLeverage(plan.symbol, plan.leverage);
     const allocatedMargin =
       plan.allocationUnit === 'usdt' ? plan.allocationValue : availableBalance * (plan.allocationValue / 100);

@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'fs/promises';
+import { mkdir, readFile, writeFile, readdir } from 'fs/promises';
 import os from 'os';
 import { join } from 'path';
 
@@ -7,24 +7,12 @@ export type CoinConfigAllocation = {
   value: number;
 };
 
-export type CoinConfigLastValidatedPlan = {
-  direction: 'long' | 'short';
-  entry_zone: [number, number];
-  planned_entry: number;
-  risk_reward: { tp1: number; tp2: number };
-  setup_type: 'breakout_retest' | 'breakdown_retest' | 'continuation';
-  stop_loss: number;
-  take_profit: { tp1: number; tp2: number };
-  confidence: number;
-};
-
 export type CoinConfig = {
   symbol: string;
   allocation: CoinConfigAllocation;
   leverage: number;
   marginMode: 'cross' | 'isolated';
-  lastValidatedPlan?: CoinConfigLastValidatedPlan | null;
-  lastValidatedAt?: string | null;
+  botMode?: 'scalping' | 'intraday';
   updatedAt: string;
 };
 
@@ -53,6 +41,36 @@ export async function loadCoinConfig(symbol: string): Promise<CoinConfig | null>
   }
 }
 
+export async function getAllCoinConfigs(): Promise<CoinConfig[]> {
+  try {
+    await ensureConfigDir();
+    const files = await readdir(CONFIG_DIR);
+    const configs: CoinConfig[] = [];
+
+    for (const file of files) {
+      if (file.endsWith('.json')) {
+        const symbol = file.replace('.json', '');
+        const config = await loadCoinConfig(symbol);
+        if (config) {
+          configs.push(config);
+        }
+      }
+    }
+
+    // Sort: GLOBAL first, then others alphabetically
+    configs.sort((a, b) => {
+      if (a.symbol === 'GLOBAL') return -1;
+      if (b.symbol === 'GLOBAL') return 1;
+      return a.symbol.localeCompare(b.symbol);
+    });
+
+    return configs;
+  } catch (error) {
+    console.error('[coin-config] Failed to load all configs:', error);
+    return [];
+  }
+}
+
 export async function saveCoinConfig(config: CoinConfig): Promise<void> {
   try {
     await ensureConfigDir();
@@ -78,8 +96,7 @@ export async function updateCoinConfigAllocation(
     allocation,
     leverage: existing?.leverage ?? 10,
     marginMode: existing?.marginMode ?? 'isolated',
-    lastValidatedPlan: existing?.lastValidatedPlan ?? null,
-    lastValidatedAt: existing?.lastValidatedAt ?? null,
+    botMode: existing?.botMode ?? 'scalping',
     updatedAt: new Date().toISOString(),
   };
   await saveCoinConfig(updated);
@@ -93,31 +110,13 @@ export async function updateCoinConfigLeverage(symbol: string, leverage: number)
     allocation: existing?.allocation ?? { type: 'percent', value: 5 },
     leverage,
     marginMode: existing?.marginMode ?? 'isolated',
-    lastValidatedPlan: existing?.lastValidatedPlan ?? null,
-    lastValidatedAt: existing?.lastValidatedAt ?? null,
+    botMode: existing?.botMode ?? 'scalping',
     updatedAt: new Date().toISOString(),
   };
   await saveCoinConfig(updated);
   return updated;
 }
 
-export async function updateCoinConfigLastValidatedPlan(
-  symbol: string,
-  plan: CoinConfigLastValidatedPlan | null,
-): Promise<CoinConfig> {
-  const existing = await loadCoinConfig(symbol);
-  const updated: CoinConfig = {
-    symbol,
-    allocation: existing?.allocation ?? { type: 'percent', value: 5 },
-    leverage: existing?.leverage ?? 10,
-    marginMode: existing?.marginMode ?? 'isolated',
-    lastValidatedPlan: plan,
-    lastValidatedAt: plan ? new Date().toISOString() : null,
-    updatedAt: new Date().toISOString(),
-  };
-  await saveCoinConfig(updated);
-  return updated;
-}
 
 export async function getOrCreateDefaultCoinConfig(symbol: string): Promise<CoinConfig> {
   const existing = await loadCoinConfig(symbol);
@@ -130,8 +129,7 @@ export async function getOrCreateDefaultCoinConfig(symbol: string): Promise<Coin
     allocation: { type: 'percent', value: 5 },
     leverage: 10,
     marginMode: 'isolated',
-    lastValidatedPlan: null,
-    lastValidatedAt: null,
+    botMode: 'scalping',
     updatedAt: new Date().toISOString(),
   };
 
@@ -149,8 +147,24 @@ export async function updateCoinConfigMarginMode(
     allocation: existing?.allocation ?? { type: 'percent', value: 5 },
     leverage: existing?.leverage ?? 10,
     marginMode,
-    lastValidatedPlan: existing?.lastValidatedPlan ?? null,
-    lastValidatedAt: existing?.lastValidatedAt ?? null,
+    botMode: existing?.botMode ?? 'scalping',
+    updatedAt: new Date().toISOString(),
+  };
+  await saveCoinConfig(updated);
+  return updated;
+}
+
+export async function updateCoinConfigBotMode(
+  symbol: string,
+  botMode: 'scalping' | 'intraday',
+): Promise<CoinConfig> {
+  const existing = await loadCoinConfig(symbol);
+  const updated: CoinConfig = {
+    symbol,
+    allocation: existing?.allocation ?? { type: 'percent', value: 5 },
+    leverage: existing?.leverage ?? 10,
+    marginMode: existing?.marginMode ?? 'isolated',
+    botMode,
     updatedAt: new Date().toISOString(),
   };
   await saveCoinConfig(updated);

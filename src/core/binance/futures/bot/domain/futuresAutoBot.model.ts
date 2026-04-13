@@ -12,6 +12,7 @@ export type FuturesAutoBotPlan = {
   entryMid: number | null;
   entryZone: { high: number | null; low: number | null };
   leverage: number;
+  marginMode?: 'isolated' | 'cross';
   notes: string[];
   riskReward: number | null;
   setupGrade: 'A+' | 'A' | 'B' | 'C';
@@ -31,6 +32,7 @@ export type FuturesAutoBotState = {
   execution?: FuturesAutoBotExecutionRecord | null;
   executionHistory?: FuturesAutoBotExecutionRecord[];
   lastScanPrice?: number | null;
+  lastClosureAt?: string | null;
   lastOpenClawValidationAt?: string | null;
   lastOpenClawValidationFingerprint?: string | null;
   openClawLockedPlan?: FuturesAutoBotPlan | null;

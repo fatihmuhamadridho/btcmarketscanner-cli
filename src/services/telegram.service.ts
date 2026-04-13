@@ -34,6 +34,55 @@ function getTelegramCredentials() {
 }
 
 export class TelegramService {
+  async sendTypingIndicator(): Promise<boolean> {
+    const { botToken, chatId } = getTelegramCredentials();
+
+    if (!botToken || !chatId) {
+      return false;
+    }
+
+    return new Promise((resolve) => {
+      const postData = JSON.stringify({
+        chat_id: chatId,
+        action: 'typing',
+      });
+
+      const options = {
+        hostname: 'api.telegram.org',
+        port: 443,
+        path: `/bot${botToken}/sendChatAction`,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(postData),
+        },
+      };
+
+      const req = https.request(options, (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+        res.on('end', () => {
+          if (res.statusCode === 200) {
+            resolve(true);
+          } else {
+            console.error(`[telegram-service] Typing indicator failed: ${res.statusCode}`);
+            resolve(false);
+          }
+        });
+      });
+
+      req.on('error', (error) => {
+        console.error('[telegram-service] Typing indicator error:', error.message);
+        resolve(false);
+      });
+
+      req.write(postData);
+      req.end();
+    });
+  }
+
   async sendMessage(message: string): Promise<boolean> {
     const { botToken, chatId } = getTelegramCredentials();
 
@@ -49,7 +98,6 @@ export class TelegramService {
       const postData = JSON.stringify({
         chat_id: chatId,
         text: message,
-        parse_mode: 'HTML',
       });
 
       const options = {
@@ -73,7 +121,13 @@ export class TelegramService {
             console.log('[telegram] Message sent successfully');
             resolve(true);
           } else {
-            console.error('[telegram] Failed to send message', res.statusCode);
+            console.error(`[telegram] Failed to send message - Status: ${res.statusCode}`);
+            try {
+              const response = JSON.parse(data);
+              console.error('[telegram] Error details:', response.description || response.error_code);
+            } catch {
+              console.error('[telegram] Response:', data);
+            }
             resolve(false);
           }
         });
@@ -99,8 +153,9 @@ export class TelegramService {
       stop_loss: '❌',
     };
 
-    const message = `${emoji[alertType] || '🔔'} <b>${symbol} ${alertType.toUpperCase()}</b>\n` +
-      `Price: <code>${price.toFixed(4)}</code>\n` +
+    const message =
+      `${emoji[alertType] || '🔔'} ${symbol} ${alertType.toUpperCase()}\n` +
+      `Price: ${price.toFixed(4)}\n` +
       `${details}`;
 
     return this.sendMessage(message);
