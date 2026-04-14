@@ -539,8 +539,18 @@ export class FuturesAutoTradeService {
     const takeProfitPrices = takeProfitPlan
       .map((item) => (item.price !== null ? normalizePrice(item.price, tickSize, symbolInfo?.pricePrecision) : null))
       .filter((value): value is number => value !== null);
+
+    // Diagnostic: log TP setup
+    console.log(
+      `[placeProtectionOrders] ${plan.symbol}: takeProfitStartIndex=${takeProfitStartIndex}, plan.takeProfits=${JSON.stringify(plan.takeProfits.map((tp) => ({ label: tp.label, price: tp.price })))}, takeProfitPrices=${JSON.stringify(takeProfitPrices)}`,
+    );
     const stopLossPrice =
       plan.stopLoss !== null ? normalizePrice(plan.stopLoss, tickSize, symbolInfo?.pricePrecision) : null;
+
+    // Diagnostic logging for SL placement
+    console.log(
+      `[placeProtectionOrders] ${plan.symbol}: SL setup - plan.stopLoss=${plan.stopLoss}, tickSize=${tickSize}, pricePrecision=${symbolInfo?.pricePrecision}, normalized stopLossPrice=${stopLossPrice}`,
+    );
     const positionSide: FuturesPositionSide | null = account.dualSidePosition
       ? plan.direction === 'long'
         ? 'LONG'
@@ -578,18 +588,36 @@ export class FuturesAutoTradeService {
       }
     }
 
-    // Calculate dynamic weights based on number of TPs to split evenly
+    // Calculate weighted distribution favoring earlier TPs (more likely to hit)
+    // TP1: 70%, TP2: 30% (for better execution likelihood)
     const numTPs = Math.max(1, takeProfitPrices.length);
-    const baseWeight = 1 / numTPs;
-    const weights = Array(numTPs)
-      .fill(0)
-      .map((_, i) => {
-        // Distribute any rounding remainder to the last TP
-        if (i === numTPs - 1) {
-          return 1 - baseWeight * (numTPs - 1);
+    let weights: number[];
+    if (numTPs === 1) {
+      weights = [1.0];
+    } else if (numTPs === 2) {
+      weights = [0.7, 0.3];
+    } else {
+      // For 3+ TPs: distribute as 50%, 30%, 15%, 5%, ...
+      weights = [];
+      let remaining = 1.0;
+      for (let i = 0; i < numTPs; i += 1) {
+        if (i === 0) {
+          weights.push(0.5);
+          remaining -= 0.5;
+        } else if (i === 1) {
+          weights.push(0.3);
+          remaining -= 0.3;
+        } else if (i === numTPs - 1) {
+          // Last TP gets remainder
+          weights.push(remaining);
+          remaining = 0;
+        } else {
+          const share = remaining / (numTPs - i);
+          weights.push(share);
+          remaining -= share;
         }
-        return baseWeight;
-      });
+      }
+    }
     const takeProfitQuantities = splitTakeProfitQuantityByWeights(
       quantity,
       stepSize,
@@ -740,7 +768,76 @@ export class FuturesAutoTradeService {
       signed: true,
     });
     const entryFilled = entryOrder.status === 'FILLED' || Number(entryOrder.executedQty ?? '0') > 0;
-    const protectionOrders = entryFilled ? await this.placeProtectionOrders(plan, quantity) : null;
+
+    // CRITICAL FIX: Place TP/SL immediately after entry order, do NOT wait for fill
+    // With reduceOnly=true, TP/SL won't execute until position exists, so it's safe to place early
+    let protectionOrders: Awaited<ReturnType<typeof this.placeProtectionOrders>> | null = null;
+    let protectionOrdersError: Error | null = null;
+
+    try {
+      protectionOrders = await this.placeProtectionOrders(plan, quantity);
+
+      // CRITICAL VALIDATIONS: SL and at least 1 TP must be placed!
+      const hasSL = Boolean(protectionOrders?.stopLossAlgoOrder);
+      const hasTP = (protectionOrders?.takeProfitAlgoOrders?.length ?? 0) > 0;
+
+      if (!hasSL) {
+        throw new Error(
+          `SL order FAILED to place! This is CRITICAL - position would be UNPROTECTED. TPs placed: ${protectionOrders?.takeProfitAlgoOrders?.length ?? 0}`,
+        );
+      }
+      if (!hasTP) {
+        throw new Error(
+          `No TP orders were placed! Position has no profit targets. SL placed: ${protectionOrders?.stopLossAlgoOrder ? 'YES' : 'NO'}`,
+        );
+      }
+
+      console.log(
+        `[executeTrade] ${plan.symbol}: TP/SL placed successfully - SL=${protectionOrders?.stopLossAlgoOrder?.algoId}, TPs=${protectionOrders?.takeProfitAlgoOrders?.length}`,
+      );
+    } catch (error) {
+      protectionOrdersError = error instanceof Error ? error : new Error('Failed to place TP/SL orders');
+      console.error(
+        `[executeTrade] ${plan.symbol}: CRITICAL - TP/SL placement failed! Entry order ${entryOrder.orderId} is at risk!`,
+        protectionOrdersError.message,
+      );
+
+      // Try to cancel entry order if TP/SL placement failed to prevent naked position
+      if (!entryFilled) {
+        let cancelSucceeded = false;
+        try {
+          console.log(`[executeTrade] ${plan.symbol}: Attempting to cancel entry order ${entryOrder.orderId} due to TP/SL placement failure...`);
+          await this.cancelOpenOrder(plan.symbol, {
+            mode: 'Regular',
+            orderId: entryOrder.orderId,
+          });
+          console.log(`[executeTrade] ${plan.symbol}: Entry order ${entryOrder.orderId} cancelled successfully.`);
+          cancelSucceeded = true;
+        } catch (cancelError) {
+          const cancelMsg = cancelError instanceof Error ? cancelError.message : 'Unknown error';
+          console.error(`[executeTrade] ${plan.symbol}: CRITICAL - Failed to cancel entry order after TP/SL failure: ${cancelMsg}`);
+          // Cancellation failed - entry order is still pending and unprotected
+          throw new Error(
+            `Failed to place TP/SL orders AND failed to cancel entry order. Entry order ${entryOrder.orderId} is UNPROTECTED! TP/SL error: ${protectionOrdersError.message}`,
+          );
+        }
+
+        // Cancellation succeeded - still throw error because TP/SL placement failed
+        if (cancelSucceeded) {
+          throw new Error(
+            `TP/SL placement failed - entry order ${entryOrder.orderId} was cancelled to prevent naked position. Original TP/SL error: ${protectionOrdersError.message}`,
+          );
+        }
+      } else {
+        // Entry already filled - we MUST have TP/SL, so rethrow original error
+        throw protectionOrdersError;
+      }
+    }
+
+    console.log(
+      `[executeTrade] ${plan.symbol}: entryFilled=${entryFilled}, protectionOrders=${protectionOrders ? 'placed' : 'placement attempted'}, SL=${protectionOrders?.stopLossAlgoOrder?.algoId ?? 'MISSING'}, TPs=${protectionOrders?.takeProfitAlgoOrders?.length ?? 0}`,
+    );
+
     return {
       entryOrder,
       entryPrice: normalizedEntryPrice,

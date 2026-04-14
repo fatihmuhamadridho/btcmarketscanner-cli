@@ -5,6 +5,7 @@ import { join } from 'path';
 import { BASE_API_BINANCE } from '@configs/base.config';
 import { formatDecimalString } from '@utils/format-number.util';
 import { loadCoinConfig, saveCoinConfig } from '@services/coin-config.service';
+import { loadBotState, saveBotState, deleteBotState } from '@services/bot-state.service';
 import type { CoinValidationSnapshotSetupCandidate } from '@features/coin/interface/CoinValidationSnapshot.interface';
 import type {
   FuturesAutoBotExecutionRecord,
@@ -38,6 +39,14 @@ function createLog(level: FuturesAutoBotLogEntry['level'], message: string): Fut
     message,
     timestamp: new Date().toISOString(),
   };
+}
+
+function setBotState(symbol: string, state: FuturesAutoBotState) {
+  inMemoryBots.set(symbol, state);
+  // Save to disk asynchronously, don't await to avoid blocking
+  saveBotState(state).catch((error) => {
+    console.error(`[bot-state] Failed to persist state for ${symbol}:`, error);
+  });
 }
 
 async function storeLogEntry(symbol: string, log: FuturesAutoBotLogEntry, _persistToRedis = true) {
@@ -183,7 +192,7 @@ function buildPlanFromOpenClawSetup(
   };
 
   console.log(
-    `[buildPlan-openclaw] ${plan.symbol}: BUILT setup.entry_zone=${JSON.stringify(setup.entry_zone)}, setup.planned_entry=${setup.planned_entry}, setup.stop_loss=${setup.stop_loss} -> entryMid=${builtPlan.entryMid}, entryZone=[${builtPlan.entryZone.low}, ${builtPlan.entryZone.high}]`,
+    `[buildPlan-openclaw] ${plan.symbol}: BUILT setup.entry_zone=${JSON.stringify(setup.entry_zone)}, setup.planned_entry=${setup.planned_entry}, setup.stop_loss=${setup.stop_loss} -> entryMid=${builtPlan.entryMid}, entryZone=[${builtPlan.entryZone.low}, ${builtPlan.entryZone.high}], builtStopLoss=${builtPlan.stopLoss}`,
   );
 
   return builtPlan;
@@ -394,7 +403,7 @@ async function runInitialOpenClawValidation(params: {
       updatedAt: timestamp,
     };
 
-    inMemoryBots.set(currentSymbol, acceptedState);
+    setBotState(currentSymbol, acceptedState);
 
 
     await storeLogEntry(
@@ -465,7 +474,7 @@ async function runInitialOpenClawValidation(params: {
         updatedAt: timestamp,
       };
 
-      inMemoryBots.set(currentSymbol, executedState);
+      setBotState(currentSymbol, executedState);
 
       await storeLogEntry(
         currentSymbol,
@@ -506,7 +515,7 @@ async function runInitialOpenClawValidation(params: {
     updatedAt: timestamp,
   };
 
-  inMemoryBots.set(currentSymbol, rejectedState);
+  setBotState(currentSymbol, rejectedState);
   await storeLogEntry(
     currentSymbol,
     createLog(
@@ -659,10 +668,14 @@ export class FuturesAutoBotService {
   hydrate(symbol: string, state: FuturesAutoBotState | null) {
     if (state === null) {
       inMemoryBots.delete(symbol);
+      // Delete from disk asynchronously
+      deleteBotState(symbol).catch((error) => {
+        console.error(`[bot-state] Failed to delete state for ${symbol}:`, error);
+      });
       return null;
     }
 
-    inMemoryBots.set(symbol, state);
+    setBotState(symbol, state);
     return state;
   }
 
@@ -675,7 +688,17 @@ export class FuturesAutoBotService {
   }
 
   async recordProgress(symbol: string) {
-    const current = inMemoryBots.get(symbol) ?? null;
+    let current = inMemoryBots.get(symbol) ?? null;
+
+    // If state not in memory, try loading from disk
+    if (!current) {
+      current = await loadBotState(symbol);
+      if (current) {
+        // Just load to memory without re-saving (to avoid potential circular ref issues)
+        inMemoryBots.set(symbol, current);
+        console.log(`[recordProgress] ${symbol}: loaded state from disk, status=${current.status}`);
+      }
+    }
 
     if (!current || current.status === 'stopped') {
       return current;
@@ -835,7 +858,7 @@ export class FuturesAutoBotService {
           status: 'entry_placed',
         };
 
-        inMemoryBots.set(symbol, focusedState);
+        setBotState(symbol, focusedState);
 
         if (!hasProtectionOrders) {
           console.log(
@@ -885,7 +908,7 @@ export class FuturesAutoBotService {
               : null,
           };
 
-          inMemoryBots.set(symbol, protectionState);
+          setBotState(symbol, protectionState);
           await storeLogEntry(
             symbol,
             createLog(
@@ -973,7 +996,7 @@ export class FuturesAutoBotService {
               lastClosureAt: null,
             };
 
-            inMemoryBots.set(symbol, filledState);
+            setBotState(symbol, filledState);
             await storeLogEntry(
               symbol,
               createLog(
@@ -1032,11 +1055,11 @@ export class FuturesAutoBotService {
           // Reset notifications for next cycle
           resetState.sentNotifications = {};
 
-          inMemoryBots.set(symbol, resetState);
+          setBotState(symbol, resetState);
           return resetState;
         }
 
-        inMemoryBots.set(symbol, scannedState);
+        setBotState(symbol, scannedState);
         await storeLogEntry(
           symbol,
           createLog(
@@ -1085,7 +1108,7 @@ export class FuturesAutoBotService {
         // Reset notifications for next cycle
         resetState.sentNotifications = {};
 
-        inMemoryBots.set(symbol, resetState);
+        setBotState(symbol, resetState);
         await storeLogEntry(
           symbol,
           createLog(
@@ -1100,7 +1123,7 @@ export class FuturesAutoBotService {
       }
 
       if (nextState.status === 'entry_placed') {
-        inMemoryBots.set(symbol, scannedState);
+        setBotState(symbol, scannedState);
         return scannedState;
       }
 
@@ -1125,7 +1148,7 @@ export class FuturesAutoBotService {
           ),
         );
 
-        inMemoryBots.set(symbol, scannedState);
+        setBotState(symbol, scannedState);
         return scannedState;
       }
 
@@ -1208,7 +1231,7 @@ export class FuturesAutoBotService {
             updatedAt: new Date().toISOString(),
           };
 
-          inMemoryBots.set(symbol, autoEntryState);
+          setBotState(symbol, autoEntryState);
 
           await storeLogEntry(
             symbol,
@@ -1235,7 +1258,7 @@ export class FuturesAutoBotService {
 
       if (isOpenClawLockedPlan && openClawUnlockReason === null) {
         if (!inEntryZone) {
-          inMemoryBots.set(symbol, scannedState);
+          setBotState(symbol, scannedState);
           return scannedState;
         }
 
@@ -1297,7 +1320,7 @@ export class FuturesAutoBotService {
           lastClosureAt: null,
         };
 
-        inMemoryBots.set(symbol, lockedExecutionState);
+        setBotState(symbol, lockedExecutionState);
 
         await storeLogEntry(
           symbol,
@@ -1316,7 +1339,7 @@ export class FuturesAutoBotService {
       const shouldRevalidateOutsideZone = isOpenClawLockedPlan && openClawUnlockReason;
 
       if (!inEntryZone && !shouldRevalidateOutsideZone) {
-        inMemoryBots.set(symbol, scannedState);
+        setBotState(symbol, scannedState);
         return scannedState;
       }
 
@@ -1335,7 +1358,7 @@ export class FuturesAutoBotService {
           shouldPersistLogs,
         );
 
-        inMemoryBots.set(symbol, scannedState);
+        setBotState(symbol, scannedState);
         return scannedState;
       }
 
@@ -1448,7 +1471,7 @@ export class FuturesAutoBotService {
               updatedAt: new Date().toISOString(),
             };
 
-            inMemoryBots.set(symbol, executedState);
+            setBotState(symbol, executedState);
 
             await storeLogEntry(
               symbol,
@@ -1491,7 +1514,7 @@ export class FuturesAutoBotService {
           updatedAt: new Date().toISOString(),
         };
 
-        inMemoryBots.set(symbol, rejectedState);
+        setBotState(symbol, rejectedState);
         await storeLogEntry(
           symbol,
           createLog(
@@ -1574,7 +1597,7 @@ export class FuturesAutoBotService {
                 status: execution.entryFilled ? 'entry_placed' : 'entry_pending',
               };
 
-              inMemoryBots.set(symbol, aggressiveExecutionState);
+              setBotState(symbol, aggressiveExecutionState);
 
               await storeLogEntry(
                 symbol,
@@ -1611,7 +1634,7 @@ export class FuturesAutoBotService {
           updatedAt: new Date().toISOString(),
         };
 
-        inMemoryBots.set(symbol, refreshedState);
+        setBotState(symbol, refreshedState);
         await storeLogEntry(
           symbol,
           createLog(
@@ -1674,7 +1697,7 @@ export class FuturesAutoBotService {
         status: execution.entryFilled ? 'entry_placed' : 'entry_pending',
       };
 
-      inMemoryBots.set(symbol, executedState);
+      setBotState(symbol, executedState);
 
       await storeLogEntry(
         symbol,
@@ -1696,7 +1719,7 @@ export class FuturesAutoBotService {
         updatedAt: new Date().toISOString(),
       };
 
-      inMemoryBots.set(symbol, erroredState);
+      setBotState(symbol, erroredState);
       await storeLogEntry(
         symbol,
         createLog('error', `Auto bot execution failed for ${symbol}: ${errorMessage}`),
@@ -1769,7 +1792,7 @@ export class FuturesAutoBotService {
       status,
     };
 
-    inMemoryBots.set(finalInput.symbol, state);
+    setBotState(finalInput.symbol, state);
     await storeLogEntry(finalInput.symbol, createLog('success', logMessage), true);
 
     try {
@@ -1814,7 +1837,7 @@ export class FuturesAutoBotService {
           status: 'entry_placed',
           updatedAt: new Date().toISOString(),
         };
-        inMemoryBots.set(finalInput.symbol, focusedState);
+        setBotState(finalInput.symbol, focusedState);
 
         // Check if TP/SL are already in place
         const [regularOrders, algoOrders] = await futuresAutoTradeService.getOpenOrders(finalInput.symbol);
@@ -1950,7 +1973,7 @@ export class FuturesAutoBotService {
               quantity: protectionQuantity,
             },
           };
-          inMemoryBots.set(finalInput.symbol, protectionState);
+          setBotState(finalInput.symbol, protectionState);
           await storeLogEntry(
             finalInput.symbol,
             createLog(
@@ -2030,7 +2053,7 @@ export class FuturesAutoBotService {
       updatedAt: new Date().toISOString(),
     };
 
-    inMemoryBots.set(symbol, nextState);
+    setBotState(symbol, nextState);
     await storeLogEntry(
       symbol,
       createLog('info', `Auto bot stopped for ${symbol}. Active watch loop ended.`),
@@ -2205,7 +2228,7 @@ export class FuturesAutoBotService {
         updatedAt: new Date().toISOString(),
       };
 
-      inMemoryBots.set(symbol, executedState);
+      setBotState(symbol, executedState);
 
       await storeLogEntry(
         symbol,
@@ -2230,6 +2253,10 @@ export class FuturesAutoBotService {
     inMemoryBots.delete(symbol);
     inMemoryLogs.delete(symbol);
     inFlightProgressChecks.delete(symbol);
+    // Also delete from disk
+    await deleteBotState(symbol).catch((error) => {
+      console.error(`[bot-state] Failed to delete state for ${symbol}:`, error);
+    });
   }
 }
 

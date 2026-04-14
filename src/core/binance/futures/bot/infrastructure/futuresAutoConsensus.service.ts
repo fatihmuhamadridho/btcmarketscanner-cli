@@ -84,7 +84,24 @@ export class FuturesAutoConsensusService {
         const trend = analyzeTrend(candles, supportResistance);
         const longSetup = analyzeSetupSide('long', candles, trend, supportResistance);
         const shortSetup = analyzeSetupSide('short', candles, trend, supportResistance);
-        const setup = longSetup.gradeRank >= shortSetup.gradeRank ? longSetup : shortSetup;
+
+        // CRITICAL: Select setup objectively - NOT biased toward long
+        // If gradeRank differs: pick the better one
+        // If equal gradeRank: pick based on risk/reward, NOT hardcoded long
+        let setup: typeof longSetup;
+        if (longSetup.gradeRank > shortSetup.gradeRank) {
+          setup = longSetup;
+        } else if (shortSetup.gradeRank > longSetup.gradeRank) {
+          setup = shortSetup;
+        } else {
+          // Equal gradeRank - pick based on better risk/reward
+          const longRR = longSetup.riskReward ?? 0;
+          const shortRR = shortSetup.riskReward ?? 0;
+          setup = longRR >= shortRR ? longSetup : shortSetup;
+          console.log(
+            `[consensus] Equal gradeRank (${longSetup.gradeRank}) - picked ${setup.direction} based on RR: Long=${longRR?.toFixed(2)}, Short=${shortRR?.toFixed(2)}`,
+          );
+        }
         return { candles, interval, longSetup, shortSetup, setup, trend, supportResistance };
       }),
     );

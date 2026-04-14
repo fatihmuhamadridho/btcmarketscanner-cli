@@ -62,12 +62,14 @@ type CachedOpenClawValidation = { expiresAt: number; result: FuturesAutoBotOpenC
 const openClawPromptInstructions = [
   'CRITICAL: Return MUST include numeric TP and SL values for entry setup validation.',
   'Validate this futures entry setup snapshot before any Binance order is opened.',
+  'IMPORTANT: EVALUATE BOTH LONG AND SHORT DIRECTIONS. Compare the quality, risk/reward, and likelihood of BOTH directions and recommend the stronger one.',
   'Use 15m anchor, 1h bias, 4h macro context, 1m trigger.',
   'Return ONLY JSON: setup_id, symbol, exchange, market_type, is_perpetual, confidence, decision, accepted, rejection_reasons, adjustment_notes, next_action, suggested_setup, validated_setup.',
-  'Confidence 0-1. If ACCEPT: validated_setup must have direction, entry_zone, planned_entry, stop_loss, take_profit (tp1 and tp2 as NUMERIC), setup_type, risk_reward.',
-  'If REJECT: set accepted=false, provide rejection_reasons and suggested_setup with numeric TP/SL, set validated_setup=null.',
+  'Confidence 0-1. If ACCEPT: validated_setup must have direction (LONG or SHORT - your choice based on which is objectively better), entry_zone, planned_entry, stop_loss, take_profit (tp1 and tp2 as NUMERIC), setup_type, risk_reward.',
+  'If REJECT: set accepted=false, provide rejection_reasons and suggested_setup with numeric TP/SL (can be LONG or SHORT), set validated_setup=null.',
   'MANDATE: Both accept and reject responses MUST include numeric stop_loss and take_profit values.',
-  'Setup coherence: check alignment across timeframes, risk/reward validity, clear entry trigger.',
+  'Setup coherence: check alignment across timeframes, risk/reward validity, clear entry trigger, AND comparative direction quality.',
+  'DO NOT bias toward long. Choose the direction (long OR short) that has the better setup quality.',
   'For {BOT_MODE}: adjust timeframe emphasis. Output ONLY JSON, no markdown, no explanation.',
   '{VOLATILITY_INSTRUCTION}',
 ].join(' ');
@@ -172,6 +174,68 @@ function getVolatilityState(price: number | null, atr14: number | null) {
   if (atrRatio < 0.1) return 'high' as const;
   return 'extreme' as const;
 }
+
+/**
+ * Track OpenClaw direction suggestions to monitor for bias
+ */
+const directionTracker = {
+  long: 0,
+  short: 0,
+  reset: () => { directionTracker.long = 0; directionTracker.short = 0; },
+  getStats: () => {
+    const total = directionTracker.long + directionTracker.short;
+    return {
+      long: directionTracker.long,
+      short: directionTracker.short,
+      total,
+      longPercent: total > 0 ? ((directionTracker.long / total) * 100).toFixed(1) : '0',
+      shortPercent: total > 0 ? ((directionTracker.short / total) * 100).toFixed(1) : '0',
+      isBalanced: total > 10 && Math.abs(directionTracker.long - directionTracker.short) <= 3,
+    };
+  },
+  track: (direction: 'long' | 'short') => {
+    if (direction === 'long') directionTracker.long += 1;
+    else directionTracker.short += 1;
+    const stats = directionTracker.getStats();
+    console.log(
+      `[OpenClaw Direction] ${direction.toUpperCase()} suggested. Stats: ${stats.long}L / ${stats.short}S (${stats.longPercent}% / ${stats.shortPercent}%) ${stats.isBalanced ? '✅ BALANCED' : '⚠️ CHECK'}`,
+    );
+  },
+};
+
+/**
+ * Infer optimal direction (long vs short) based on market structure
+ * Uses distance to support/resistance and trend to determine which direction is more favorable
+ */
+function inferDirectionFromSnapshot(snapshot: CoinValidationSnapshot): 'long' | 'short' {
+  const currentPrice = snapshot.current_context.price;
+  const distToResistance = snapshot.setup_candidate?.distance_to_resistance;
+  const distToSupport = snapshot.setup_candidate?.distance_to_support;
+  const trendState = snapshot.current_context.trend ?? 'neutral';
+
+  if (!currentPrice) return 'long'; // Fallback
+
+  // Calculate normalized distances (closer distance = better opportunity)
+  const normResistance = distToResistance && currentPrice > 0 ? distToResistance / currentPrice : Infinity;
+  const normSupport = distToSupport && currentPrice > 0 ? distToSupport / currentPrice : Infinity;
+
+  // Trend bias
+  const isUptrend = trendState.toLowerCase().includes('up');
+  const isDowntrend = trendState.toLowerCase().includes('down');
+
+  // Logic: prefer direction that is closer to support/resistance AND aligns with trend
+  // Shorter distance = more likely to be hit = better trade
+  const scoreShort = normResistance * (isDowntrend ? 0.5 : 1.5); // Short prefers downtrend + resistance
+  const scoreLong = normSupport * (isUptrend ? 0.5 : 1.5); // Long prefers uptrend + support
+
+  const inferredDirection = scoreLong <= scoreShort ? 'long' : 'short';
+
+  console.log(
+    `[inferDirection] ${snapshot.symbol}: scoreLong=${scoreLong?.toFixed(4)}, scoreShort=${scoreShort?.toFixed(4)}, trend=${trendState}, inferred=${inferredDirection}`,
+  );
+
+  return inferredDirection;
+}
 async function runOpenClawValidation(snapshot: CoinValidationSnapshot, botMode: 'scalping' | 'intraday' = 'scalping') {
   const { logDir, timestamp } = await createOpenClawValidationLogDir();
   let response: OpenClawValidationResponse | null = null;
@@ -261,9 +325,10 @@ async function runOpenClawValidation(snapshot: CoinValidationSnapshot, botMode: 
     } catch (parseError) {
       console.error('[openclaw validation] parsing failed:', parseError);
       // Create a fallback response with the candidate setup and auto-fixed TP/SL
+      const inferredDirection = inferDirectionFromSnapshot(snapshot);
       const fallbackSetup = normalizeValidatedSetup(
         snapshot.setup_candidate ?? {
-          direction: 'long',
+          direction: inferredDirection,
           distance_to_resistance: null,
           distance_to_support: null,
           entry_zone: [snapshot.current_context.price ?? 0, snapshot.current_context.price ?? 0],
@@ -368,6 +433,7 @@ function createRejectedResult(
     Pick<FuturesAutoBotOpenClawValidationResult, 'adjustment_notes' | 'next_action' | 'suggested_setup'>
   >,
 ): FuturesAutoBotOpenClawValidationResult {
+  const inferredDirection = inferDirectionFromSnapshot(snapshot);
   return {
     adjustment_notes: details?.adjustment_notes ?? [],
     confidence,
@@ -377,7 +443,7 @@ function createRejectedResult(
     suggested_setup: details?.suggested_setup ?? null,
     validated_setup: normalizeValidatedSetup(
       snapshot.setup_candidate ?? {
-        direction: 'long',
+        direction: inferredDirection,
         distance_to_resistance: null,
         distance_to_support: null,
         entry_zone: [snapshot.current_context.price ?? 0, snapshot.current_context.price ?? 0],
@@ -456,8 +522,10 @@ function parseOpenClawResponse(rawResponse: string): OpenClawValidationResponse 
   if (Array.isArray(cleanedParsed.rejection_reasons) && cleanedParsed.rejection_reasons.some((item: any) => typeof item !== 'string')) validationErrors.push(`rejection_reasons contains non-string items`);
   if (!Array.isArray(cleanedParsed.adjustment_notes)) validationErrors.push(`adjustment_notes is not array: ${typeof cleanedParsed.adjustment_notes}`);
   if (Array.isArray(cleanedParsed.adjustment_notes) && cleanedParsed.adjustment_notes.some((item: any) => typeof item !== 'string')) validationErrors.push(`adjustment_notes contains non-string items`);
-  const validNextActions = ['wait_for_entry_zone', 'wait_for_new_data', 'flip_direction', 'ready_to_enter', 'wait_for_pullback_reclaim', 'wait_for_breakout'];
-  if (!validNextActions.includes(cleanedParsed.next_action)) validationErrors.push(`next_action is invalid: ${cleanedParsed.next_action}`);
+  // Accept known actions or any action starting with "wait_for_" (e.g., wait_for_fresh_1m_reclaim)
+  const validNextActions = ['wait_for_entry_zone', 'wait_for_new_data', 'flip_direction', 'ready_to_enter', 'wait_for_pullback_reclaim', 'wait_for_breakout', 'wait_for_fresh_reclaim'];
+  const isValidNextAction = validNextActions.includes(cleanedParsed.next_action) || /^wait_for_/.test(cleanedParsed.next_action);
+  if (!isValidNextAction) validationErrors.push(`next_action is invalid: ${cleanedParsed.next_action}`);
   if (cleanedParsed.suggested_setup !== null && typeof cleanedParsed.suggested_setup !== 'object') validationErrors.push(`suggested_setup is not null|object: ${typeof cleanedParsed.suggested_setup}`);
   if (cleanedParsed.suggested_setup !== null && typeof cleanedParsed.suggested_setup === 'object' && cleanedParsed.suggested_setup.direction !== 'long' && cleanedParsed.suggested_setup.direction !== 'short') validationErrors.push(`suggested_setup.direction is invalid: ${cleanedParsed.suggested_setup.direction}`);
   if (!('validated_setup' in cleanedParsed)) validationErrors.push(`validated_setup field is missing`);
@@ -483,10 +551,15 @@ function parseOpenClawResponse(rawResponse: string): OpenClawValidationResponse 
       throw new Error('OpenClaw returned no validated_setup.');
     }
 
-    // Use provided direction or default to 'long'
-    const direction =
-      validatedSetup.direction === 'long' || validatedSetup.direction === 'short' ? validatedSetup.direction : 'long';
-    cleanedParsed.validated_setup!.direction = direction;
+    // Use provided direction (it should always be present now with updated prompt)
+    // But if missing, infer from market structure (not hardcoded to 'long')
+    let direction = validatedSetup.direction as 'long' | 'short';
+    if (direction !== 'long' && direction !== 'short') {
+      console.warn(
+        `[parseOpenClawResponse] OpenClaw returned invalid direction: ${direction}. This will be fixed in parseValidationResult with market structure inference.`,
+      );
+    }
+    cleanedParsed.validated_setup!.direction = direction || 'long'; // Temp placeholder, will be fixed later
 
     // Use provided entry_zone or create one
     let entryZone = validatedSetup.entry_zone as [number, number];
@@ -635,6 +708,20 @@ function parseValidationResult(
           suggested_setup: response.suggested_setup,
         },
       );
+
+    // Validate and fix direction if needed
+    let validatedSetup = response.validated_setup;
+    if (validatedSetup.direction !== 'long' && validatedSetup.direction !== 'short') {
+      const inferredDir = inferDirectionFromSnapshot(snapshot);
+      console.warn(
+        `[parseValidationResult] OpenClaw returned invalid direction "${validatedSetup.direction}". Inferred direction: ${inferredDir}`,
+      );
+      validatedSetup = { ...validatedSetup, direction: inferredDir };
+    } else {
+      // Track valid OpenClaw direction for bias monitoring
+      directionTracker.track(validatedSetup.direction);
+    }
+
     return {
       adjustment_notes: response.adjustment_notes,
       confidence: response.confidence,
@@ -643,7 +730,7 @@ function parseValidationResult(
       setup_id: snapshot.setup_id,
       next_action: response.next_action,
       suggested_setup: response.suggested_setup,
-      validated_setup: response.validated_setup,
+      validated_setup: validatedSetup,
       validation_result: 'accepted',
     };
   } catch (error) {
